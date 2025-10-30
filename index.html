@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.supabase.co; img-src 'self' data: https:;">
+    <title>Drawing Project Manager</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="styles.css">
+    
+    <!-- Supabase Client Library (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <!-- Supabase Configuration -->
+    <script src="supabase-config.js"></script>
+    
+    <!-- Supabase Helper Functions -->
+    <script src="supabase-helpers.js"></script>
+</head>
+<body>
+    <div class="layout" id="appLayout" style="display: none;">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>Drawing Manager</h1>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="nav-item active" data-view="dashboard">
+                    <span class="icon">🏠</span>
+                    Dashboard
+                </div>
+                <div class="nav-item" data-view="projects">
+                    <span class="icon">📋</span>
+                    Projects
+                    <span class="notification-badge" id="pendingCount">0</span>
+                </div>
+                <div class="nav-item" data-view="gantt">
+                    <span class="icon">📊</span>
+                    Gantt Chart
+                </div>
+                <div class="nav-item" data-view="calendar">
+                    <span class="icon">📅</span>
+                    Calendar
+                </div>
+                <div class="nav-item" data-view="team">
+                    <span class="icon">👥</span>
+                    Team
+                </div>
+                <div class="nav-item" data-view="reports">
+                    <span class="icon">📊</span>
+                    Reports
+                </div>
+                <div class="nav-item" data-view="tasks">
+                    <span class="icon">✓</span>
+                    Tasks
+                </div>
+                <div class="nav-item" onclick="logout()" style="cursor: pointer; margin-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 20px;">
+                    <span class="icon">🚪</span>
+                    Logout
+                </div>
+            </nav>
+            <div class="sidebar-user" id="sidebarUser">
+                <!-- User info will be populated by JavaScript -->
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div id="content-area"></div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
