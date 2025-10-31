@@ -386,6 +386,7 @@ async function logout() {
 async function initializeApp() {
     try {
         setupNavigation();
+        setupKeyboardShortcuts();
         await loadProjectsFromDatabase();
         await loadTasksFromDatabase();
         await loadTeamMembersFromDatabase();
@@ -949,6 +950,45 @@ window.addEventListener('beforeunload', function(e) {
     }
 });
 
+// Keyboard Shortcuts
+function setupKeyboardShortcuts() {
+    document.addEventListener('keydown', function(e) {
+        // Escape key - close modals
+        if (e.key === 'Escape') {
+            closeModal();
+            
+            // Also close any confirm/error modals
+            const confirmModal = document.querySelector('.confirm-modal-overlay');
+            if (confirmModal) {
+                confirmModal.remove();
+            }
+        }
+        
+        // Cmd/Ctrl + K - Focus search (if implemented)
+        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+            e.preventDefault();
+            const searchInput = document.getElementById('searchInput');
+            if (searchInput) {
+                searchInput.focus();
+                searchInput.select();
+            }
+        }
+        
+        // N key - New project (only if not in input field)
+        if (e.key === 'n' && !isInputFocused()) {
+            e.preventDefault();
+            if (currentView === 'projects') {
+                showAddProjectModal();
+            }
+        }
+    });
+}
+
+function isInputFocused() {
+    const active = document.activeElement;
+    return active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable);
+}
+
 // Navigation setup
 function setupNavigation() {
     document.querySelectorAll('.nav-item').forEach(item => {
@@ -1048,24 +1088,34 @@ function renderDashboardPage() {
     today.setHours(0, 0, 0, 0);
     
     // Calculate key metrics
-    const overdueCount = projectsData.filter(p => {
-        const dueDate = new Date(p.dueDate);
+    const overdueProjects = projectsData.filter(p => {
+        if (!p.dueDate) return false;
+        if (p.status === 'Completed' || p.status === 'Cancelled' || p.status === 'Sent to Production') return false;
+        const dueDate = parseDate(p.dueDate);
+        if (!dueDate || isNaN(dueDate.getTime())) return false; // Invalid date
         dueDate.setHours(0, 0, 0, 0);
-        return dueDate < today && p.status !== 'Completed' && p.status !== 'Cancelled';
-    }).length;
+        return dueDate < today;
+    });
+    const overdueCount = overdueProjects.length;
     
     const dueTodayCount = projectsData.filter(p => {
-        const dueDate = new Date(p.dueDate);
+        if (!p.dueDate) return false;
+        if (p.status === 'Completed' || p.status === 'Cancelled' || p.status === 'Sent to Production') return false;
+        const dueDate = parseDate(p.dueDate);
+        if (!dueDate || isNaN(dueDate.getTime())) return false; // Invalid date
         dueDate.setHours(0, 0, 0, 0);
-        return dueDate.getTime() === today.getTime() && p.status !== 'Completed' && p.status !== 'Cancelled';
+        return dueDate.getTime() === today.getTime();
     }).length;
     
     const endOfWeek = new Date(today);
     endOfWeek.setDate(endOfWeek.getDate() + (7 - today.getDay()));
     const dueThisWeekCount = projectsData.filter(p => {
-        const dueDate = new Date(p.dueDate);
+        if (!p.dueDate) return false;
+        if (p.status === 'Completed' || p.status === 'Cancelled' || p.status === 'Sent to Production') return false;
+        const dueDate = parseDate(p.dueDate);
+        if (!dueDate || isNaN(dueDate.getTime())) return false; // Invalid date
         dueDate.setHours(0, 0, 0, 0);
-        return dueDate > today && dueDate <= endOfWeek && p.status !== 'Completed' && p.status !== 'Cancelled';
+        return dueDate > today && dueDate <= endOfWeek;
     }).length;
     
     const totalActive = projectsData.filter(p => 
@@ -2870,6 +2920,7 @@ function renderReportsPage() {
                         <div class="stat-card" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${stats.orderSWValue.toLocaleString()}</div>
                             <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total S/W Value</div>
+                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">${stats.orderSWM3.toFixed(1)} m³ total</div>
                         </div>
                         <div class="stat-card" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${Math.round(stats.orderFramePrice).toLocaleString()}</div>
@@ -2917,6 +2968,7 @@ function renderReportsPage() {
                         <div class="stat-card" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${stats.visualSWValue.toLocaleString()}</div>
                             <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total S/W Value</div>
+                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">${stats.visualSWM3.toFixed(1)} m³ total</div>
                         </div>
                         <div class="stat-card" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${Math.round(stats.visualFramePrice).toLocaleString()}</div>
@@ -3569,9 +3621,9 @@ function calculateDetailedStats(startDate = null, endDate = null) {
         totalTimeLogged, avgTimePerProject, projectsWithTime, activeTimers, avgDaysToFirstIssue,
         projectsIssuedThisMonth, projectsCompletedThisMonth, projectsStartedThisMonth,
         orderOakValue, orderSWValue, orderFramePrice, orderAvgFramePrice, orderProjectsWithCosting,
-        orderCompletedValue, orderInProgressValue, orderOakM3,
+        orderCompletedValue, orderInProgressValue, orderOakM3, orderSWM3,
         visualOakValue, visualSWValue, visualFramePrice, visualAvgFramePrice, visualProjectsWithCosting,
-        visualCompletedValue, visualInProgressValue, visualOakM3,
+        visualCompletedValue, visualInProgressValue, visualOakM3, visualSWM3,
         uniqueClients, repeatClients, avgProjectsPerClient, topSalesPersonCount, 
         topSalesPerson: topSalesPersonName, projectsWithClientReview, avgClientResponseTime,
         newClientsThisMonth, clientSatisfactionProjects,
@@ -6930,13 +6982,51 @@ function closeModal() {
 // Helper function for status colors in KPI modals
 function getStatusColor(status) {
     const colors = {
+        'Requested': '#3b82f6',
         'In Progress': '#3b82f6',
         'Checking': '#f59e0b',
         'With Client': '#ec4899',
         'Signed Off': '#10b981',
         'On Hold': '#6b7280',
+        'Changing': '#1abc9c',
+        'Sent to Production': '#16a085',
         'Cancelled': '#ef4444',
         'Completed': '#059669'
     };
     return colors[status] || '#6b7280';
 }
+
+// Get status icon emoji
+function getStatusIcon(status) {
+    const icons = {
+        'Requested': '📝',
+        'In Progress': '🔵',
+        'Checking': '🔍',
+        'With Client': '👁️',
+        'Signed Off': '✅',
+        'On Hold': '⏸️',
+        'Changing': '🔄',
+        'Sent to Production': '🏭',
+        'Cancelled': '❌',
+        'Completed': '✓'
+    };
+    return icons[status] || '📋';
+}
+
+// Generate avatar HTML with color based on name
+function generateAvatar(name, size = '') {
+    if (!name) return '';
+    const initials = name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2);
+    const colors = ['blue', 'green', 'orange', 'purple', 'pink', 'red', 'teal', 'indigo'];
+    const colorIndex = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % colors.length;
+    const colorClass = `avatar-${colors[colorIndex]}`;
+    const sizeClass = size ? `avatar-${size}` : '';
+    return `<div class="avatar ${sizeClass} ${colorClass}">${initials}</div>`;
+}
+
+// Render status badge with icon
+function renderStatusBadge(status) {
+    const icon = getStatusIcon(status);
+    return `<span class="status-badge badge-with-icon ${getStatusClass(status)}">${icon} ${status}</span>`;
+}
+

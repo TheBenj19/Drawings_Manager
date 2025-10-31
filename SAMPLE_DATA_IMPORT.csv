@@ -1,0 +1,6 @@
+Job Number,Order Type,Customer Name,Order Date,First Issue Date,Days to Issue,First Issue Target,Sales Person,Designer,Current Version,Notes,Status,Signed Off,Issued to Production,Sign Off Lead Time,Total Changes,Structural Calcs,Calcs Status
+JOB-2025-001,New Build,ABC Corporation,9/1/2025,9/15/2025,14,9/12/2025,Michael Brown,John Smith,Rev 3,"Client requested changes to the lobby design. Revised plans submitted for approval.",In Progress,No,9/20/2025,5,3,Yes,Approved
+JOB-2025-002,Renovation,XYZ Developers,10/1/2025,10/18/2025,17,10/15/2025,Sarah Williams,Sarah Johnson,Rev 1,Waiting for planning permission approval from local authorities.,Planning,No,,0,1,Yes,Pending
+JOB-2025-003,Commercial,Metro Properties,8/1/2025,8/10/2025,9,8/12/2025,David Lee,Mike Chen,Rev 5,Client reviewing final drawings. Minor revisions expected.,Review,Pending,9/1/2025,8,5,Yes,Approved
+JOB-2025-004,Landscape,City Council,7/1/2025,7/20/2025,19,7/22/2025,Jennifer Davis,Emma Davis,Rev 2,Project successfully completed and delivered to client.,Completed,Yes,8/5/2025,3,2,No,N/A
+JOB-2025-005,Industrial,Logistics Inc,9/15/2025,10/1/2025,16,9/30/2025,Robert Taylor,John Smith,Rev 2,Structural engineer reviewing foundation design.,In Progress,No,,0,2,Yes,In Review
