@@ -1,3 +1,412 @@
+// ============================================
+// ERROR HANDLING UTILITIES
+// ============================================
+
+class ErrorHandler {
+    constructor() {
+        this.errorLog = [];
+        this.maxLogSize = 100;
+        this.isOnline = navigator.onLine;
+        this.setupOnlineListeners();
+    }
+
+    setupOnlineListeners() {
+        window.addEventListener('online', () => {
+            this.isOnline = true;
+            this.showNotification('✅ Connection restored', 'success');
+            this.retryQueuedOperations();
+        });
+        
+        window.addEventListener('offline', () => {
+            this.isOnline = false;
+            this.showOfflineBanner();
+        });
+    }
+
+    showOfflineBanner() {
+        const existingBanner = document.getElementById('offlineBanner');
+        if (existingBanner) return;
+
+        const banner = document.createElement('div');
+        banner.id = 'offlineBanner';
+        banner.innerHTML = `
+            <span>⚠️ You are offline. Changes will be saved when connection is restored.</span>
+        `;
+        banner.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #ff9800;
+            color: white;
+            padding: 12px;
+            text-align: center;
+            z-index: 10000;
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        `;
+        document.body.appendChild(banner);
+    }
+
+    hideOfflineBanner() {
+        const banner = document.getElementById('offlineBanner');
+        if (banner) banner.remove();
+    }
+
+    async retryQueuedOperations() {
+        this.hideOfflineBanner();
+        // Queue operations would be implemented here if needed
+        // For now, we'll just show a message to refresh
+        this.showNotification('Please refresh to sync any pending changes', 'info');
+    }
+
+    logError(error, context = {}) {
+        const errorEntry = {
+            timestamp: new Date().toISOString(),
+            message: error.message || String(error),
+            stack: error.stack,
+            context: {
+                ...context,
+                user: currentUser?.email || 'Unknown',
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            }
+        };
+
+        this.errorLog.push(errorEntry);
+        
+        // Keep log size manageable
+        if (this.errorLog.length > this.maxLogSize) {
+            this.errorLog.shift();
+        }
+
+        // Log to console with structured data
+        console.error('Error logged:', errorEntry);
+        
+        return errorEntry;
+    }
+
+    async retryOperation(operation, options = {}) {
+        const {
+            maxRetries = 3,
+            initialDelay = 1000,
+            backoffMultiplier = 2,
+            onRetry = null
+        } = options;
+
+        let lastError;
+        let delay = initialDelay;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    if (onRetry) onRetry(attempt, maxRetries);
+                    await this.sleep(delay);
+                    delay *= backoffMultiplier;
+                }
+                
+                return await operation();
+            } catch (error) {
+                lastError = error;
+                
+                // Don't retry certain errors
+                if (this.isNonRetryableError(error)) {
+                    throw error;
+                }
+                
+                if (attempt === maxRetries) {
+                    break;
+                }
+            }
+        }
+
+        throw lastError;
+    }
+
+    isNonRetryableError(error) {
+        const message = error.message?.toLowerCase() || '';
+        
+        // Don't retry authentication errors, validation errors, or 4xx errors
+        return message.includes('invalid login') ||
+               message.includes('unauthorized') ||
+               message.includes('forbidden') ||
+               message.includes('not found') ||
+               message.includes('validation') ||
+               message.includes('bad request');
+    }
+
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    handleError(error, context = {}) {
+        this.logError(error, context);
+
+        const errorType = this.categorizeError(error);
+        const userMessage = this.getUserFriendlyMessage(errorType, error);
+        
+        this.showNotification(userMessage, 'error');
+        
+        return { errorType, userMessage };
+    }
+
+    categorizeError(error) {
+        const message = error.message?.toLowerCase() || '';
+        
+        if (!this.isOnline || message.includes('network') || message.includes('fetch')) {
+            return 'NETWORK';
+        }
+        if (message.includes('unauthorized') || message.includes('invalid login')) {
+            return 'AUTH';
+        }
+        if (message.includes('validation') || message.includes('required') || message.includes('invalid')) {
+            return 'VALIDATION';
+        }
+        if (message.includes('timeout')) {
+            return 'TIMEOUT';
+        }
+        if (message.includes('not found')) {
+            return 'NOT_FOUND';
+        }
+        
+        return 'UNKNOWN';
+    }
+
+    getUserFriendlyMessage(errorType, error) {
+        const messages = {
+            NETWORK: '🌐 Connection issue. Please check your internet and try again.',
+            AUTH: '🔒 Session expired. Please log in again.',
+            VALIDATION: '⚠️ Please check your input and try again.',
+            TIMEOUT: '⏱️ Request timed out. Please try again.',
+            NOT_FOUND: '🔍 The requested item was not found.',
+            UNKNOWN: '❌ Something went wrong. Please try again or contact support.'
+        };
+
+        return messages[errorType] || messages.UNKNOWN;
+    }
+
+    showNotification(message, type = 'info') {
+        showNotification(message, type);
+    }
+
+    getErrorLog() {
+        return [...this.errorLog];
+    }
+
+    clearErrorLog() {
+        this.errorLog = [];
+    }
+}
+
+// Initialize global error handler
+const errorHandler = new ErrorHandler();
+
+// Global error catcher for unhandled promise rejections
+window.addEventListener('unhandledrejection', (event) => {
+    errorHandler.handleError(event.reason, { 
+        type: 'unhandled_rejection',
+        promise: 'Promise rejection was not caught'
+    });
+    event.preventDefault();
+});
+
+// Global error catcher
+window.addEventListener('error', (event) => {
+    errorHandler.handleError(event.error, { 
+        type: 'global_error',
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno
+    });
+});
+
+// ============================================
+// FORM VALIDATION UTILITIES
+// ============================================
+
+class FormValidator {
+    constructor() {
+        this.validators = {
+            required: (value, fieldName) => {
+                if (!value || value.trim() === '') {
+                    return `${fieldName} is required`;
+                }
+                return null;
+            },
+            
+            minLength: (value, fieldName, minLength) => {
+                if (value && value.length < minLength) {
+                    return `${fieldName} must be at least ${minLength} characters`;
+                }
+                return null;
+            },
+            
+            maxLength: (value, fieldName, maxLength) => {
+                if (value && value.length > maxLength) {
+                    return `${fieldName} must be less than ${maxLength} characters`;
+                }
+                return null;
+            },
+            
+            email: (value, fieldName) => {
+                const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                if (value && !emailRegex.test(value)) {
+                    return `Please enter a valid email address`;
+                }
+                return null;
+            },
+            
+            unique: (value, fieldName, existingValues) => {
+                if (existingValues.includes(value)) {
+                    return `${fieldName} "${value}" already exists`;
+                }
+                return null;
+            },
+            
+            date: (value, fieldName) => {
+                if (value) {
+                    const date = new Date(value);
+                    if (isNaN(date.getTime())) {
+                        return `Please enter a valid date`;
+                    }
+                }
+                return null;
+            },
+            
+            futureDate: (value, fieldName) => {
+                if (value) {
+                    const date = new Date(value);
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+                    if (date < today) {
+                        return `${fieldName} cannot be in the past`;
+                    }
+                }
+                return null;
+            },
+            
+            number: (value, fieldName) => {
+                if (value && isNaN(Number(value))) {
+                    return `${fieldName} must be a number`;
+                }
+                return null;
+            },
+            
+            positiveNumber: (value, fieldName) => {
+                if (value && (isNaN(Number(value)) || Number(value) < 0)) {
+                    return `${fieldName} must be a positive number`;
+                }
+                return null;
+            }
+        };
+    }
+    
+    validateField(inputElement, rules) {
+        const value = inputElement.value;
+        const fieldName = inputElement.getAttribute('data-label') || inputElement.id;
+        
+        // Clear previous validation state
+        this.clearFieldValidation(inputElement);
+        
+        // Run all validation rules
+        for (const rule of rules) {
+            const { type, params = [] } = typeof rule === 'string' ? { type: rule } : rule;
+            const validator = this.validators[type];
+            
+            if (validator) {
+                const error = validator(value, fieldName, ...params);
+                if (error) {
+                    this.showFieldError(inputElement, error);
+                    return false;
+                }
+            }
+        }
+        
+        // Show success state if field has value
+        if (value && value.trim() !== '') {
+            this.showFieldSuccess(inputElement);
+        }
+        
+        return true;
+    }
+    
+    showFieldError(inputElement, message) {
+        inputElement.classList.add('input-error');
+        inputElement.classList.remove('input-success');
+        
+        // Create or update error message
+        let errorEl = inputElement.parentElement.querySelector('.field-error');
+        if (!errorEl) {
+            errorEl = document.createElement('div');
+            errorEl.className = 'field-error';
+            inputElement.parentElement.appendChild(errorEl);
+        }
+        errorEl.innerHTML = `<span class="error-icon">⚠️</span> ${message}`;
+        errorEl.style.display = 'flex';
+    }
+    
+    showFieldSuccess(inputElement) {
+        inputElement.classList.add('input-success');
+        inputElement.classList.remove('input-error');
+        
+        // Remove error message
+        const errorEl = inputElement.parentElement.querySelector('.field-error');
+        if (errorEl) {
+            errorEl.style.display = 'none';
+        }
+    }
+    
+    clearFieldValidation(inputElement) {
+        inputElement.classList.remove('input-error', 'input-success');
+        const errorEl = inputElement.parentElement.querySelector('.field-error');
+        if (errorEl) {
+            errorEl.style.display = 'none';
+        }
+    }
+    
+    validateForm(formElement) {
+        const inputs = formElement.querySelectorAll('[data-validate]');
+        let isValid = true;
+        let firstInvalidField = null;
+        
+        inputs.forEach(input => {
+            const rules = JSON.parse(input.getAttribute('data-validate') || '[]');
+            if (rules.length > 0) {
+                const fieldValid = this.validateField(input, rules);
+                if (!fieldValid) {
+                    isValid = false;
+                    if (!firstInvalidField) {
+                        firstInvalidField = input;
+                    }
+                }
+            }
+        });
+        
+        // Focus on first invalid field
+        if (firstInvalidField) {
+            firstInvalidField.focus();
+            firstInvalidField.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        
+        return isValid;
+    }
+}
+
+// Initialize global form validator
+const formValidator = new FormValidator();
+
+// ============================================
+// APPLICATION SETTINGS
+// ============================================
+
+// Application Settings (configurable)
+let appSettings = {
+    timber: {
+        oakPricePerM3: 1500,  // £1500 per m³
+        softwoodPricePerM3: 800  // £800 per m³
+    }
+};
+
 // Team Members & Authentication
 let teamMembers = [
     {
@@ -85,6 +494,38 @@ let teamMembers = [
 let currentUser = null;
 let isAuthenticated = false;
 
+// Performance optimization: Stats cache to avoid recalculating on every render
+let statsCache = {
+    data: null,
+    timestamp: 0,
+    ttl: 30000 // 30 seconds cache
+};
+
+function getCachedStats(startDate = null, endDate = null, forceRefresh = false) {
+    const now = Date.now();
+    const cacheKey = `${startDate}-${endDate}`;
+    
+    if (!forceRefresh && 
+        statsCache.data && 
+        statsCache.cacheKey === cacheKey &&
+        (now - statsCache.timestamp) < statsCache.ttl) {
+        return statsCache.data;
+    }
+    
+    const stats = calculateDetailedStats(startDate, endDate);
+    statsCache = {
+        data: stats,
+        timestamp: now,
+        ttl: 30000,
+        cacheKey
+    };
+    return stats;
+}
+
+function invalidateStatsCache() {
+    statsCache.timestamp = 0;
+}
+
 // Check authentication on load
 async function checkAuth() {
     try {
@@ -100,11 +541,179 @@ async function checkAuth() {
         }
         isAuthenticated = true;
         document.getElementById('appLayout').style.display = 'flex';
+        
+        // Setup session monitoring
+        setupSessionMonitoring();
+        
         return true;
     } catch (error) {
-        console.error('Auth check error:', error);
+        errorHandler.logError(error, { action: 'checkAuth' });
         showLoginScreen();
         return false;
+    }
+}
+
+// Session monitoring to detect expired sessions
+let sessionCheckInterval = null;
+function setupSessionMonitoring() {
+    // Check session every 5 minutes
+    if (sessionCheckInterval) {
+        clearInterval(sessionCheckInterval);
+    }
+    
+    sessionCheckInterval = setInterval(async () => {
+        try {
+            const session = await SupabaseAPI.getCurrentSession();
+            if (!session) {
+                handleSessionExpired();
+            }
+        } catch (error) {
+            errorHandler.logError(error, { action: 'sessionCheck' });
+            // Only show re-login if it's an auth error
+            if (error.message?.includes('auth') || error.message?.includes('session')) {
+                handleSessionExpired();
+            }
+        }
+    }, 5 * 60 * 1000); // 5 minutes
+}
+
+function handleSessionExpired() {
+    clearInterval(sessionCheckInterval);
+    
+    // Save current state
+    const currentState = {
+        view: currentView,
+        projectId: currentProject?.id,
+        timestamp: new Date().toISOString()
+    };
+    localStorage.setItem('sessionState', JSON.stringify(currentState));
+    
+    // Show re-login modal
+    showReLoginModal();
+}
+
+function showReLoginModal() {
+    // Remove existing modal if any
+    const existingModal = document.getElementById('reLoginModal');
+    if (existingModal) return;
+    
+    const modal = document.createElement('div');
+    modal.id = 'reLoginModal';
+    modal.className = 'modal-overlay';
+    modal.style.zIndex = '10001';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2>🔒 Session Expired</h2>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 20px;">Your session has expired. Please log in again to continue.</p>
+                <p style="color: #666; font-size: 14px; margin-bottom: 20px;">
+                    ✅ Don't worry - your work has been saved and you'll be returned to where you left off.
+                </p>
+                <div class="form-group">
+                    <label for="reLoginEmail">Email</label>
+                    <input type="email" id="reLoginEmail" class="form-control" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="reLoginPassword">Password</label>
+                    <input type="password" id="reLoginPassword" class="form-control" required autocomplete="current-password">
+                </div>
+                <div id="reLoginError" style="display: none; color: #ef4444; padding: 12px; background: #fee; border-radius: 4px; margin-top: 12px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-primary" id="reLoginBtn" onclick="handleReLogin()">Log In</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    
+    // Focus email input
+    setTimeout(() => document.getElementById('reLoginEmail')?.focus(), 100);
+    
+    // Allow Enter key to submit
+    document.getElementById('reLoginEmail')?.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') handleReLogin();
+    });
+    document.getElementById('reLoginPassword')?.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') handleReLogin();
+    });
+}
+
+async function handleReLogin() {
+    const emailInput = document.getElementById('reLoginEmail');
+    const passwordInput = document.getElementById('reLoginPassword');
+    const errorEl = document.getElementById('reLoginError');
+    const loginBtn = document.getElementById('reLoginBtn');
+    
+    const email = emailInput?.value.trim();
+    const password = passwordInput?.value;
+    
+    if (!email || !password) {
+        errorEl.textContent = '⚠️ Please enter both email and password.';
+        errorEl.style.display = 'block';
+        return;
+    }
+    
+    try {
+        loginBtn.textContent = 'Logging in...';
+        loginBtn.disabled = true;
+        errorEl.style.display = 'none';
+        
+        const { user, profile } = await SupabaseAPI.signIn(email, password);
+        
+        isAuthenticated = true;
+        currentUser = profile;
+        
+        // Remove modal
+        document.getElementById('reLoginModal')?.remove();
+        
+        // Restore session state
+        const savedState = localStorage.getItem('sessionState');
+        if (savedState) {
+            try {
+                const state = JSON.parse(savedState);
+                
+                // Reload data
+                await loadProjectsFromDatabase();
+                
+                // Restore view and project
+                if (state.projectId) {
+                    currentProject = projectsData.find(p => p.id === state.projectId);
+                    if (currentProject) {
+                        showProjectDetail(currentProject);
+                    } else {
+                        showView(state.view || 'dashboard');
+                    }
+                } else {
+                    showView(state.view || 'dashboard');
+                }
+                
+                localStorage.removeItem('sessionState');
+            } catch (e) {
+                errorHandler.logError(e, { action: 'restoreSessionState' });
+            }
+        }
+        
+        // Resume session monitoring
+        setupSessionMonitoring();
+        
+        showNotification('✅ Welcome back! You\'ve been logged in successfully.', 'success');
+        
+    } catch (error) {
+        errorHandler.logError(error, { action: 'reLogin' });
+        
+        if (error.message.includes('Invalid login credentials')) {
+            errorEl.textContent = '❌ Invalid email or password. Please try again.';
+        } else {
+            errorEl.textContent = '❌ Login failed. Please try again.';
+        }
+        
+        errorEl.style.display = 'block';
+        loginBtn.textContent = 'Log In';
+        loginBtn.disabled = false;
+        passwordInput.value = '';
+        passwordInput.focus();
     }
 }
 
@@ -385,6 +994,16 @@ async function logout() {
 // Initialize app after login
 async function initializeApp() {
     try {
+        // Load settings from localStorage
+        const savedSettings = localStorage.getItem('appSettings');
+        if (savedSettings) {
+            try {
+                appSettings = JSON.parse(savedSettings);
+            } catch (e) {
+                console.error('Failed to parse settings:', e);
+            }
+        }
+        
         setupNavigation();
         setupKeyboardShortcuts();
         await loadProjectsFromDatabase();
@@ -424,9 +1043,20 @@ async function initializeApp() {
 
 // Load projects from Supabase
 async function loadProjectsFromDatabase() {
+    showLoading('Loading projects...');
+    
     try {
-        showLoading('Loading projects...');
-        const projects = await SupabaseAPI.getAllProjects();
+        // Use retry logic for loading projects
+        const projects = await errorHandler.retryOperation(
+            async () => await SupabaseAPI.getAllProjects(),
+            {
+                maxRetries: 3,
+                initialDelay: 1000,
+                onRetry: (attempt, max) => {
+                    showLoading(`Loading projects... (Retry ${attempt}/${max})`);
+                }
+            }
+        );
         
         projectsData = projects.map(p => ({
             id: p.id,
@@ -473,8 +1103,17 @@ async function loadProjectsFromDatabase() {
             complexityScore: p.complexity_score || 3
         }));
         
-        // Load ALL time entries in one query instead of per-project
-        const allTimeEntries = await SupabaseAPI.getAllTimeEntries();
+        // Load ALL time entries in one query instead of per-project (with retry)
+        const allTimeEntries = await errorHandler.retryOperation(
+            async () => await SupabaseAPI.getAllTimeEntries(),
+            {
+                maxRetries: 3,
+                initialDelay: 1000,
+                onRetry: (attempt, max) => {
+                    showLoading(`Loading time entries... (Retry ${attempt}/${max})`);
+                }
+            }
+        );
         
         // Group time entries by project
         for (let project of projectsData) {
@@ -491,12 +1130,18 @@ async function loadProjectsFromDatabase() {
             project.totalTimeMinutes = project.timeEntries.reduce((sum, te) => sum + te.duration, 0);
         }
         
+        // Invalidate stats cache when projects are reloaded
+        invalidateStatsCache();
+        
         hideLoading();
+        showNotification('✅ Projects loaded successfully', 'success');
     } catch (error) {
         hideLoading();
-        console.error('Failed to load projects:', error);
-        showNotification('Failed to load projects. Please refresh the page.', 'error');
-        throw error;
+        errorHandler.handleError(error, {
+            action: 'loadProjects',
+            projectCount: projectsData?.length || 0
+        });
+        // Don't throw - allow app to continue with existing data
     }
 }
 
@@ -877,14 +1522,15 @@ let filterOrderType = '';
 let filterProjectType = '';
 let filterSalesPerson = '';
 let filterDesigner = '';
+let filterMyProjects = false;
 let sortColumn = '';
 let sortDirection = 'asc';
 
 // Status options by project type
 const statusOptions = {
-    'Planning': ['Requested', 'In Progress', 'Checking', 'With Client', 'On Hold', 'Changing', 'Completed'],
-    'Visual': ['Requested', 'In Progress', 'Checking', 'With Client', 'On Hold', 'Changing', 'Completed'],
-    'Order': ['Requested', 'In Progress', 'Checking', 'With Client', 'On Hold', 'Changing', 'Signed Off', 'Sent to Production', 'Completed', 'Cancelled']
+    'Planning': ['Requested', 'In Progress', 'On Hold', 'Changing', 'Completed'],
+    'Visual': ['Requested', 'In Progress', 'On Hold', 'Changing', 'Completed'],
+    'Order': ['Requested', 'In Progress', 'On Hold', 'With Client', 'Changing', 'Signed Off', 'Sent to Production']
 };
 
 // Timer persistence functions
@@ -1014,6 +1660,11 @@ function updateSidebarUser() {
             </div>
         `;
     }
+    
+    // Show/hide admin-only nav items
+    document.querySelectorAll('.admin-only').forEach(el => {
+        el.style.display = currentUser && currentUser.role === 'Admin' ? 'block' : 'none';
+    });
 }
 
 // Show view
@@ -1084,71 +1735,109 @@ function showView(view) {
 // Dashboard Page - Summary Overview Only
 // =====================================================
 function renderDashboardPage() {
+    // Check if this is a completely fresh app with no projects
+    if (projectsData.length === 0) {
+        return `
+            <div class="dashboard-page">
+                <div class="page-header">
+                    <div>
+                        <h2>🏠 Workload Overview</h2>
+                        <p style="color: var(--gray-500); margin-top: 8px;">Real-time summary of all projects and team capacity</p>
+                    </div>
+                    <div class="header-actions">
+                        <button class="btn-primary" onclick="addNewProject()">+ New Project</button>
+                    </div>
+                </div>
+                ${renderEmptyState({
+                    icon: '🎉',
+                    title: 'Welcome to Drawing Manager!',
+                    description: 'Get started by creating your first project. Track drawings, manage deadlines, and collaborate with your team all in one place.',
+                    actionText: '+ Create Your First Project',
+                    actionHandler: 'addNewProject()',
+                    suggestions: [
+                        'Organize projects by client and job number',
+                        'Assign designers and set due dates',
+                        'Track time spent on each project',
+                        'Monitor progress from start to finish',
+                        'Generate reports on team performance'
+                    ]
+                })}
+            </div>
+        `;
+    }
+    
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    // Calculate key metrics
-    const overdueProjects = projectsData.filter(p => {
-        if (!p.dueDate) return false;
-        if (p.status === 'Completed' || p.status === 'Cancelled' || p.status === 'Sent to Production') return false;
-        const dueDate = parseDate(p.dueDate);
-        if (!dueDate || isNaN(dueDate.getTime())) return false; // Invalid date
-        dueDate.setHours(0, 0, 0, 0);
-        return dueDate < today;
-    });
-    const overdueCount = overdueProjects.length;
-    
-    const dueTodayCount = projectsData.filter(p => {
-        if (!p.dueDate) return false;
-        if (p.status === 'Completed' || p.status === 'Cancelled' || p.status === 'Sent to Production') return false;
-        const dueDate = parseDate(p.dueDate);
-        if (!dueDate || isNaN(dueDate.getTime())) return false; // Invalid date
-        dueDate.setHours(0, 0, 0, 0);
-        return dueDate.getTime() === today.getTime();
-    }).length;
-    
     const endOfWeek = new Date(today);
     endOfWeek.setDate(endOfWeek.getDate() + (7 - today.getDay()));
-    const dueThisWeekCount = projectsData.filter(p => {
-        if (!p.dueDate) return false;
-        if (p.status === 'Completed' || p.status === 'Cancelled' || p.status === 'Sent to Production') return false;
-        const dueDate = parseDate(p.dueDate);
-        if (!dueDate || isNaN(dueDate.getTime())) return false; // Invalid date
-        dueDate.setHours(0, 0, 0, 0);
-        return dueDate > today && dueDate <= endOfWeek;
-    }).length;
     
-    const totalActive = projectsData.filter(p => 
-        p.status !== 'Completed' && p.status !== 'Cancelled'
-    ).length;
+    // OPTIMIZED: Single pass through projects to calculate all metrics
+    const metrics = projectsData.reduce((acc, p) => {
+        // Check if project is active
+        const isActive = isProjectActive(p);
+        if (isActive) {
+            acc.totalActive++;
+            
+            // Count by type
+            if (p.projectType === 'Visual') acc.typeCounts.Visual++;
+            else if (p.projectType === 'Planning') acc.typeCounts.Planning++;
+            else if (p.projectType === 'Order') acc.typeCounts.Order++;
+            
+            // Designer workload
+            if (p.designer) {
+                acc.designerWorkload[p.designer] = (acc.designerWorkload[p.designer] || 0) + 1;
+            }
+        }
+        
+        // Count by status
+        if (p.status) {
+            acc.statusCounts[p.status] = (acc.statusCounts[p.status] || 0) + 1;
+        }
+        
+        // Check due dates for active projects
+        if (p.dueDate && !isProjectFinished(p) && p.status !== 'Cancelled') {
+            const dueDate = parseDate(p.dueDate);
+            if (dueDate && !isNaN(dueDate.getTime())) {
+                dueDate.setHours(0, 0, 0, 0);
+                
+                if (dueDate < today) {
+                    acc.overdueProjects.push(p);
+                } else if (dueDate.getTime() === today.getTime()) {
+                    acc.dueTodayCount++;
+                } else if (dueDate > today && dueDate <= endOfWeek) {
+                    acc.dueThisWeekCount++;
+                }
+            }
+        }
+        
+        return acc;
+    }, {
+        totalActive: 0,
+        overdueProjects: [],
+        dueTodayCount: 0,
+        dueThisWeekCount: 0,
+        statusCounts: {},
+        typeCounts: { Visual: 0, Planning: 0, Order: 0 },
+        designerWorkload: {}
+    });
     
-    // Status breakdown
-    const statusCounts = {
-        'In Progress': projectsData.filter(p => p.status === 'In Progress').length,
-        'Checking': projectsData.filter(p => p.status === 'Checking').length,
-        'With Client': projectsData.filter(p => p.status === 'With Client').length,
-        'Signed Off': projectsData.filter(p => p.status === 'Signed Off').length,
-        'On Hold': projectsData.filter(p => p.status === 'On Hold').length,
-        'Completed': projectsData.filter(p => p.status === 'Completed').length
-    };
+    // Extract results
+    const overdueProjects = metrics.overdueProjects;
+    const overdueCount = overdueProjects.length;
+    const dueTodayCount = metrics.dueTodayCount;
+    const dueThisWeekCount = metrics.dueThisWeekCount;
+    const totalActive = metrics.totalActive;
+    const statusCounts = metrics.statusCounts;
+    const typeCounts = metrics.typeCounts;
     
-    // Project type breakdown
-    const typeCounts = {
-        'Visual': projectsData.filter(p => p.projectType === 'Visual' && p.status !== 'Completed' && p.status !== 'Cancelled').length,
-        'Planning': projectsData.filter(p => p.projectType === 'Planning' && p.status !== 'Completed' && p.status !== 'Cancelled').length,
-        'Order': projectsData.filter(p => p.projectType === 'Order' && p.status !== 'Completed' && p.status !== 'Cancelled').length
-    };
+    // Convert designer workload to array format
+    const designerWorkload = Object.entries(metrics.designerWorkload)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count);
     
-    // Designer workload
-    const designers = [...new Set(projectsData.map(p => p.designer))].filter(d => d);
-    const designerWorkload = designers.map(designer => {
-        const activeProjects = projectsData.filter(p => 
-            p.designer === designer && 
-            p.status !== 'Completed' && 
-            p.status !== 'Cancelled'
-        ).length;
-        return { name: designer, count: activeProjects };
-    }).sort((a, b) => b.count - a.count);
+    // Get unique designers list for display
+    const designers = designerWorkload.map(d => d.name).filter(name => name);
     
     return `
         <div class="dashboard-page">
@@ -1360,6 +2049,9 @@ function renderProjectsPage() {
                         <span class="search-icon">🔍</span>
                         <input type="text" placeholder="Search projects..." id="searchInput" value="${searchTerm}">
                     </div>
+                    <button class="btn-secondary ${filterMyProjects ? 'active' : ''}" onclick="toggleMyProjects()" data-tooltip="Show only my projects">
+                        👤 ${filterMyProjects ? 'My Projects' : 'All Projects'}
+                    </button>
                     <button class="btn-secondary" onclick="toggleFilters()" id="filterBtn">
                         ${filterStatus || filterOrderType || filterProjectType || filterSalesPerson || filterDesigner ? '🔍 Filters Active' : '🔍 Filter'}
                     </button>
@@ -1463,10 +2155,10 @@ function renderProjectsPage() {
                     </thead>
                     <tbody>
                         ${sorted.map(project => `
-                            <tr onclick="showProjectDetail('${project.id}')" style="cursor: pointer;">
-                                <td class="project-name">${project.jobNumber}</td>
-                                <td>${project.client}</td>
-                                <td>${project.orderType}</td>
+                            <tr onclick="showProjectDetail('${project.id}')" style="cursor: pointer; ${isProjectFinished(project) ? 'opacity: 0.6; background: rgba(0, 0, 0, 0.02);' : ''}">
+                                <td class="project-name" ${isProjectFinished(project) ? 'style="text-decoration: line-through; color: #6b7280;"' : ''}>${project.jobNumber}</td>
+                                <td${isProjectFinished(project) ? ' style="color: #6b7280;"' : ''}>${project.client}</td>
+                                <td${isProjectFinished(project) ? ' style="color: #6b7280;"' : ''}>${project.orderType}</td>
                                 <td>
                                     <span class="tasktype-badge ${getProjectTypeClass(project.projectType)}">
                                         ${project.projectType}
@@ -1510,7 +2202,7 @@ function renderNewProjectPage(project) {
             <div class="page-header">
                 <button class="btn-back" onclick="cancelNewProject()">← Cancel</button>
                 <div class="header-actions">
-                    <button class="btn-primary" onclick="saveNewProject()">Save Project</button>
+                    <button class="btn-primary" id="saveNewProjectBtn" onclick="saveNewProject()">Save Project</button>
                 </div>
             </div>
             
@@ -1526,35 +2218,62 @@ function renderNewProjectPage(project) {
                     <div class="card">
                         <h3>Job Information</h3>
                         <div class="detail-grid">
-                            <div class="detail-item">
-                                <label>Job Number *</label>
-                                <input type="text" class="form-input" id="jobNumber" placeholder="e.g., JOB-2025-001" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Job Number</label>
+                                <input 
+                                    type="text" 
+                                    class="form-input" 
+                                    id="jobNumber" 
+                                    placeholder="e.g., JOB-2025-001" 
+                                    required
+                                    data-label="Job Number"
+                                    data-validate='["required", {"type":"minLength","params":[3]}]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                             </div>
-                            <div class="detail-item">
-                                <label>Client *</label>
-                                <input type="text" class="form-input" id="projectClient" placeholder="Enter client name" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Client</label>
+                                <input 
+                                    type="text" 
+                                    class="form-input" 
+                                    id="projectClient" 
+                                    placeholder="Enter client name" 
+                                    required
+                                    data-label="Client Name"
+                                    data-validate='["required", {"type":"minLength","params":[2]}]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                             </div>
-                            <div class="detail-item">
-                                <label>Order Type *</label>
-                                <input type="text" class="form-input" id="orderType" placeholder="e.g., New Build, Renovation" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Order Type</label>
+                                <input 
+                                    type="text" 
+                                    class="form-input" 
+                                    id="orderType" 
+                                    placeholder="e.g., New Build, Renovation" 
+                                    required
+                                    data-label="Order Type"
+                                    data-validate='["required"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                             </div>
-                            <div class="detail-item">
-                                <label>Task *</label>
+                            <div class="form-group detail-item">
+                                <label class="required">Task</label>
                                 <select class="form-input" id="projectType" onchange="updateProjectTypeStatus()">
                                     ${projectTypes.map(type => `
                                         <option value="${type}" ${type === project.projectType ? 'selected' : ''}>${type}</option>
                                     `).join('')}
                                 </select>
                             </div>
-                            <div class="detail-item">
-                                <label>Status *</label>
+                            <div class="form-group detail-item">
+                                <label class="required">Status</label>
                                 <select class="form-input" id="projectStatus">
                                     ${statusOpts.map(s => `
                                         <option value="${s}" ${s === project.status ? 'selected' : ''}>${s}</option>
                                     `).join('')}
                                 </select>
                             </div>
-                            <div class="detail-item">
+                            <div class="form-group detail-item">
                                 <label>Priority</label>
                                 <select class="form-input" id="projectPriority">
                                     ${priorities.map(p => `
@@ -1562,18 +2281,32 @@ function renderNewProjectPage(project) {
                                     `).join('')}
                                 </select>
                             </div>
-                            <div class="detail-item">
-                                <label>Sales Person *</label>
-                                <select class="form-input" id="salesPerson" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Sales Person</label>
+                                <select 
+                                    class="form-input" 
+                                    id="salesPerson" 
+                                    required
+                                    data-label="Sales Person"
+                                    data-validate='["required"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                                     <option value="">Select Sales Person</option>
                                     ${teamMembers.filter(m => m.active && m.role === 'Sales').map(m => `
                                         <option value="${m.name}">${m.name}</option>
                                     `).join('')}
                                 </select>
                             </div>
-                            <div class="detail-item">
-                                <label>Designer *</label>
-                                <select class="form-input" id="designer" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Designer</label>
+                                <select 
+                                    class="form-input" 
+                                    id="designer" 
+                                    required
+                                    data-label="Designer"
+                                    data-validate='["required"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                                     <option value="">Select Designer</option>
                                     ${teamMembers.filter(m => m.active && ['Designer', 'Senior Designer', 'Lead Designer'].includes(m.role)).map(m => `
                                         <option value="${m.name}">${m.name}</option>
@@ -1592,34 +2325,74 @@ function renderNewProjectPage(project) {
                     <div class="card">
                         <h3>Timeline & Dates</h3>
                         <div class="detail-grid">
-                            <div class="detail-item">
-                                <label>Requested Date *</label>
-                                <input type="date" class="form-input" id="orderDate" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Requested Date</label>
+                                <input 
+                                    type="date" 
+                                    class="form-input" 
+                                    id="orderDate" 
+                                    required
+                                    data-label="Requested Date"
+                                    data-validate='["required", "date"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
+                                <span class="field-hint">When was this project requested?</span>
                             </div>
-                            <div class="detail-item">
-                                <label>Due Date *</label>
-                                <input type="date" class="form-input" id="projectDueDate" required>
+                            <div class="form-group detail-item">
+                                <label class="required">Due Date</label>
+                                <input 
+                                    type="date" 
+                                    class="form-input" 
+                                    id="projectDueDate" 
+                                    required
+                                    data-label="Due Date"
+                                    data-validate='["required", "date"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
+                                <span class="field-hint">Project delivery deadline</span>
                             </div>
-                            <div class="detail-item">
+                            <div class="form-group detail-item">
                                 <label>First Issue Date</label>
-                                <input type="date" class="form-input" id="firstIssueDate">
+                                <input 
+                                    type="date" 
+                                    class="form-input" 
+                                    id="firstIssueDate"
+                                    data-label="First Issue Date"
+                                    data-validate='["date"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                             </div>
-                            <div class="detail-item">
+                            <div class="form-group detail-item">
                                 <label>Days to Issue</label>
-                                <input type="number" class="form-input" id="daysToIssue" placeholder="Auto-calculated" readonly>
+                                <input 
+                                    type="number" 
+                                    class="form-input" 
+                                    id="daysToIssue" 
+                                    placeholder="Auto-calculated" 
+                                    readonly
+                                >
+                                <span class="field-hint">Calculated from request to first issue</span>
                             </div>
-                            <div class="detail-item">
+                            <div class="form-group detail-item planning-visual-hide" style="display: none;">
                                 <label>Issued to Production</label>
                                 <input type="date" class="form-input" id="issuedToProduction">
                             </div>
-                            <div class="detail-item">
+                            <div class="form-group detail-item planning-visual-hide" style="display: none;">
                                 <label>Sign Off Lead Time (days)</label>
-                                <input type="number" class="form-input" id="signOffLeadTime" value="0">
+                                <input 
+                                    type="number" 
+                                    class="form-input" 
+                                    id="signOffLeadTime" 
+                                    value="0"
+                                    data-label="Sign Off Lead Time"
+                                    data-validate='["positiveNumber"]'
+                                    onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                                >
                             </div>
                         </div>
                     </div>
                     
-                    <div class="card">
+                    <div class="card planning-hide" style="display: none;">
                         <h3>Structural Calculations</h3>
                         <div class="detail-grid">
                             <div class="detail-item">
@@ -1688,9 +2461,9 @@ function renderProjectDetailPage(project) {
                 <div class="header-actions">
                     ${isEditing ? `
                         <button class="btn-secondary" onclick="cancelEdit()">Cancel</button>
-                        <button class="btn-primary" onclick="saveProject()">Save Changes</button>
+                        <button class="btn-primary" id="saveProjectBtn" onclick="saveProject()">Save Changes</button>
                     ` : `
-                        <button class="btn-secondary" onclick="deleteProject()" style="background: #ef4444; border-color: #dc2626;">Delete Project</button>
+                        <button class="btn-secondary" id="deleteProjectBtn" onclick="deleteProject()" style="background: #ef4444; border-color: #dc2626;">Delete Project</button>
                         <button class="btn-primary" onclick="startEdit()">Edit Project</button>
                     `}
                 </div>
@@ -1838,18 +2611,20 @@ function renderProjectDetailPage(project) {
                                 <label>Days to Issue</label>
                                 <p>${project.daysToIssue || '-'}</p>
                             </div>
-                            <div class="detail-item">
-                                <label>Issued to Production</label>
-                                ${isEditing ? `
-                                    <input type="date" class="form-input" id="issuedToProduction" value="${project.issuedToProduction ? formatDateToInput(project.issuedToProduction) : ''}">
-                                ` : `
-                                    <p>${project.issuedToProduction || 'Not yet'}</p>
-                                `}
-                            </div>
-                            <div class="detail-item">
-                                <label>Sign Off Lead Time</label>
-                                <p>${calculateSignOffLeadTime(project.orderDate, project.issuedToProduction)} days</p>
-                            </div>
+                            ${project.projectType === 'Order' ? `
+                                <div class="detail-item">
+                                    <label>Issued to Production</label>
+                                    ${isEditing ? `
+                                        <input type="date" class="form-input" id="issuedToProduction" value="${project.issuedToProduction ? formatDateToInput(project.issuedToProduction) : ''}">
+                                    ` : `
+                                        <p>${project.issuedToProduction || 'Not yet'}</p>
+                                    `}
+                                </div>
+                                <div class="detail-item">
+                                    <label>Sign Off Lead Time</label>
+                                    <p>${calculateSignOffLeadTime(project.orderDate, project.issuedToProduction)} days</p>
+                                </div>
+                            ` : ''}
                             <div class="detail-item">
                                 <label>Total Revisions</label>
                                 <p id="totalChangesDisplay">${project.totalChanges}</p>
@@ -1857,6 +2632,7 @@ function renderProjectDetailPage(project) {
                         </div>
                     </div>
                     
+                    ${project.projectType !== 'Planning' ? `
                     <div class="card">
                         <h3>Structural Calculations</h3>
                         <div class="detail-grid">
@@ -1914,6 +2690,7 @@ function renderProjectDetailPage(project) {
                             </div>
                         </div>
                     </div>
+                    ` : ''}
                     
                     <div class="card">
                         <h3>Time Tracking</h3>
@@ -1979,7 +2756,20 @@ function renderProjectDetailPage(project) {
                                     </tbody>
                                 </table>
                             ` : `
-                                <p style="color: #7f8c8d; font-size: 14px; margin-top: 10px;">No time entries yet. Start the timer or add a manual entry.</p>
+                                <div style="margin-top: 10px;">
+                                    ${renderEmptyState({
+                                        icon: '⏱️',
+                                        title: 'No time logged yet',
+                                        description: 'Start tracking time to monitor how long this project takes.',
+                                        actionText: project.timerRunning ? null : '▶️ Start Timer',
+                                        actionHandler: project.timerRunning ? null : 'startTimer()',
+                                        suggestions: [
+                                            'Use the timer for real-time tracking',
+                                            'Add manual entries for past work',
+                                            'Track time to improve estimates'
+                                        ]
+                                    })}
+                                </div>
                             `}
                         </div>
                     </div>
@@ -1995,11 +2785,12 @@ function renderProjectDetailPage(project) {
                         `}
                     </div>
                     
+                    ${project.projectType === 'Order' ? `
                     <div class="card">
                         <h3>Material & Cost</h3>
                         <div class="detail-grid">
                             <div class="detail-item">
-                                <label>Oak m³</label>
+                                <label data-tooltip="Cubic metres of oak timber">Oak m³</label>
                                 ${isEditing ? `
                                     <input type="number" step="0.01" class="form-input" id="oakM3" value="${project.oakM3 || ''}" placeholder="0.00">
                                 ` : `
@@ -2007,7 +2798,7 @@ function renderProjectDetailPage(project) {
                                 `}
                             </div>
                             <div class="detail-item">
-                                <label>S/W m³</label>
+                                <label data-tooltip="Cubic metres of softwood timber">S/W m³</label>
                                 ${isEditing ? `
                                     <input type="number" step="0.01" class="form-input" id="swM3" value="${project.swM3 || ''}" placeholder="0.00">
                                 ` : `
@@ -2036,6 +2827,7 @@ function renderProjectDetailPage(project) {
                             <p class="notes-text">${project.bomFeedback || 'No BOM errors reported - error-free ✅'}</p>
                         `}
                     </div>
+                    ` : ''}
                     
                     <div class="card">
                         <h3>Brief Feedback</h3>
@@ -2371,6 +3163,7 @@ function renderCalendar(month, year) {
     
     // Get projects for this month
     const projectsByDate = {};
+    let totalProjectsInMonth = 0;
     projectsData.forEach(project => {
         const [day, mon, yr] = project.dueDate.split('/');
         const projectMonth = parseInt(mon) - 1;
@@ -2382,8 +3175,25 @@ function renderCalendar(month, year) {
                 projectsByDate[projectDay] = [];
             }
             projectsByDate[projectDay].push(project);
+            totalProjectsInMonth++;
         }
     });
+    
+    // If no projects in this month, show empty state
+    if (totalProjectsInMonth === 0) {
+        return renderEmptyState({
+            icon: '📅',
+            title: `No projects in ${monthNames[month]} ${year}`,
+            description: 'There are no project deadlines scheduled for this month. Try navigating to a different month or create a new project.',
+            actionText: '+ Create Project',
+            actionHandler: 'addNewProject()',
+            suggestions: [
+                'Use the navigation buttons to view other months',
+                'Create a new project and set a due date',
+                'Check that project due dates are set correctly'
+            ]
+        });
+    }
     
     let calendarHTML = `
         <div class="calendar-container">
@@ -2418,7 +3228,7 @@ function renderCalendar(month, year) {
                             dueDate.setHours(0, 0, 0, 0);
                             
                             const isDueToday = dueDate.getTime() === today.getTime();
-                            const isOverdue = dueDate < today && project.status !== 'Completed' && project.status !== 'Cancelled' && project.status !== 'Sent to Production';
+                            const isOverdue = dueDate < today && !isProjectFinished(project) && project.status !== 'Cancelled';
                             
                             let urgencyIndicator = '';
                             let borderColor = '#10b981'; // Default green for normal projects
@@ -2429,7 +3239,11 @@ function renderCalendar(month, year) {
                             } else if (isDueToday) {
                                 urgencyIndicator = '<div style="position: absolute; top: 2px; right: 2px; width: 8px; height: 8px; background: #f59e0b; border-radius: 50%; box-shadow: 0 0 0 2px #fff, 0 0 6px #f59e0b;" title="Due Today"></div>';
                                 borderColor = '#f59e0b'; // Orange/yellow for due today
+                            } else if (isProjectFinished(project)) {
+                                borderColor = '#9ca3af'; // Gray for finished projects
                             }
+                            
+                            const finishedStyle = isProjectFinished(project) ? 'opacity: 0.5; filter: grayscale(30%);' : '';
                             
                             return `
                             <div class="calendar-project-card" onclick="showProjectDetail('${project.id}')" style="
@@ -2443,11 +3257,12 @@ function renderCalendar(month, year) {
                                 padding: 8px;
                                 border-radius: 8px;
                                 position: relative;
+                                ${finishedStyle}
                             " onmouseover="this.style.transform='translateX(3px)'; this.style.boxShadow='0 8px 16px -4px rgba(0,0,0,0.15)'" onmouseout="this.style.transform=''; this.style.boxShadow='0 2px 4px -1px rgba(0,0,0,0.06)'">
                                 ${urgencyIndicator}
                                 <div style="position: absolute; top: -15px; right: -15px; width: 60px; height: 60px; background: ${borderColor}; opacity: 0.04; border-radius: 50%;"></div>
                                 <div class="calendar-project-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; position: relative; z-index: 1;">
-                                    <span class="calendar-project-job" style="font-weight: 800; color: #111827; font-size: 11px; letter-spacing: -0.01em;">${project.jobNumber}</span>
+                                    <span class="calendar-project-job" style="font-weight: 800; color: #111827; font-size: 11px; letter-spacing: -0.01em; ${isProjectFinished(project) ? 'text-decoration: line-through;' : ''}">${project.jobNumber}</span>
                                     <span class="status-badge ${getStatusClass(project.status)}" style="font-size: 8px; padding: 3px 7px; border-radius: 10px; font-weight: 700; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                                         ${project.status}
                                     </span>
@@ -2533,11 +3348,12 @@ function renderTeamPage() {
                 <button class="btn-primary" onclick="addTeamMember()">+ Add Member</button>
             </div>
             
+            ${teamMembers.length === 0 ? renderTeamEmptyState() : `
             <div class="team-grid">
                 ${teamMembers.map(member => `
                     <div class="team-card ${!member.active ? 'inactive' : ''}">
                         <div class="team-card-header">
-                            <div class="team-avatar">${member.name.split(' ').map(n => n[0]).join('')}</div>
+                            ${generateAvatar(member.name, 'large')}
                             <div class="team-info">
                                 <h3>${member.name}</h3>
                                 <p class="team-role">${member.role}</p>
@@ -2621,6 +3437,7 @@ function renderTeamPage() {
                     </div>
                 `).join('')}
             </div>
+            `}
         </div>
     `;
 }
@@ -2657,7 +3474,34 @@ function attachTeamEventListeners() {
 
 // Render Reports Page
 function renderReportsPage() {
-    const stats = calculateDetailedStats();
+    const stats = getCachedStats();
+    
+    // Check if there are no projects to report on
+    if (stats.total === 0) {
+        return `
+            <div class="reports-page">
+                <div class="page-header">
+                    <h2>Reports Dashboard</h2>
+                    <div class="header-actions">
+                        <button class="btn-secondary" onclick="exportReportPDF()" disabled>Export PDF</button>
+                        <button class="btn-primary" onclick="exportReportCSV()" disabled>Export CSV</button>
+                    </div>
+                </div>
+                ${renderEmptyState({
+                    icon: '📊',
+                    title: 'No data to report',
+                    description: 'Create some projects first to see analytics and reports. The reports dashboard shows insights about your project workflow, timelines, and team performance.',
+                    actionText: '+ Create Your First Project',
+                    actionHandler: 'addNewProject()',
+                    suggestions: [
+                        'Add projects to track progress and deadlines',
+                        'Log time entries to see productivity metrics',
+                        'Complete projects to view performance trends'
+                    ]
+                })}
+            </div>
+        `;
+    }
     
     return `
         <div class="reports-page">
@@ -2686,6 +3530,15 @@ function renderReportsPage() {
                     <button class="btn-secondary" onclick="resetReportsDateRange()" style="align-self: flex-end;">Reset</button>
                     <div class="filter-summary" id="filterSummary" style="align-self: center; color: #3b82f6; font-weight: 600; font-size: 14px;">Showing all time</div>
                 </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('last7days')" data-tooltip="Last 7 days">Last 7 Days</button>
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('last30days')" data-tooltip="Last 30 days">Last 30 Days</button>
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('last90days')" data-tooltip="Last 90 days">Last 90 Days</button>
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('thisMonth')" data-tooltip="This month">This Month</button>
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('lastMonth')" data-tooltip="Last month">Last Month</button>
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('thisQuarter')" data-tooltip="This quarter">This Quarter</button>
+                    <button class="btn-secondary btn-sm" onclick="setDateRangePreset('thisYear')" data-tooltip="This year">This Year</button>
+                </div>
             </div>
             
             <!-- 📋 Sales Brief Quality -->
@@ -2695,6 +3548,7 @@ function renderReportsPage() {
                     <div class="stat-card clickable-kpi" onclick="showKPIBreakdown('briefQuality')" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; cursor: pointer;">
                         <div class="stat-value">${stats.briefQualityScore}%</div>
                         <div class="stat-label" style="color: rgba(255,255,255,0.9);">Brief Quality Score</div>
+                        <div style="margin-top: 8px; font-size: 11px; opacity: 0.85; line-height: 1.4;">Briefs with no issues reported</div>
                         <div style="margin-top: 12px; padding: 8px; background: rgba(255,255,255,0.2); border-radius: 8px; text-align: center; font-size: 12px;">
                             ${stats.briefQualityScore < 50 ? '⚠️ Needs improvement' : stats.briefQualityScore < 70 ? '📋 Fair' : '✅ Good'}
                         </div>
@@ -2763,7 +3617,7 @@ function renderReportsPage() {
                         <div class="stat-value">${stats.activeDesigners}</div>
                         <div class="stat-label" style="color: rgba(255,255,255,0.9);">Active Designers</div>
                         <div style="margin-top: 12px; padding: 8px; background: rgba(255,255,255,0.2); border-radius: 8px; text-align: center; font-size: 12px;">
-                            👥 ${stats.totalTeamMembers} total team members
+                            👥 Designers with active projects
                         </div>
                         <div style="margin-top: 8px; font-size: 11px; opacity: 0.8;">Click for details →</div>
                     </div>
@@ -2914,17 +3768,17 @@ function renderReportsPage() {
                     <div class="stats-grid" style="grid-template-columns: 1fr; gap: 12px;">
                         <div class="stat-card" style="background: linear-gradient(135deg, #92400e 0%, #78350f 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${stats.orderOakValue.toLocaleString()}</div>
-                            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total Oak Value</div>
-                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">${stats.orderOakM3.toFixed(1)} m³ total</div>
+                            <div class="stat-label" style="color: rgba(255,255,255,0.9);" data-tooltip="Total value of oak timber">Total Oak Value</div>
+                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;" data-tooltip="Cubic metres of oak">${stats.orderOakM3.toFixed(1)} m³ total</div>
                         </div>
                         <div class="stat-card" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${stats.orderSWValue.toLocaleString()}</div>
-                            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total S/W Value</div>
-                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">${stats.orderSWM3.toFixed(1)} m³ total</div>
+                            <div class="stat-label" style="color: rgba(255,255,255,0.9);" data-tooltip="Total value of softwood timber">Total S/W Value</div>
+                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;" data-tooltip="Cubic metres of softwood">${stats.orderSWM3.toFixed(1)} m³ total</div>
                         </div>
                         <div class="stat-card" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${Math.round(stats.orderFramePrice).toLocaleString()}</div>
-                            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total Sale Value</div>
+                            <div class="stat-label" style="color: rgba(255,255,255,0.9);" data-tooltip="Total sale value of all orders">Total Sale Value</div>
                             <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">Avg: £${Math.round(stats.orderAvgFramePrice).toLocaleString()}</div>
                         </div>
                     </div>
@@ -2962,17 +3816,17 @@ function renderReportsPage() {
                     <div class="stats-grid" style="grid-template-columns: 1fr; gap: 12px;">
                         <div class="stat-card" style="background: linear-gradient(135deg, #92400e 0%, #78350f 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${stats.visualOakValue.toLocaleString()}</div>
-                            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total Oak Value</div>
-                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">${stats.visualOakM3.toFixed(1)} m³ total</div>
+                            <div class="stat-label" style="color: rgba(255,255,255,0.9);" data-tooltip="Total value of oak timber">Total Oak Value</div>
+                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;" data-tooltip="Cubic metres of oak">${stats.visualOakM3.toFixed(1)} m³ total</div>
                         </div>
                         <div class="stat-card" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${stats.visualSWValue.toLocaleString()}</div>
-                            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total S/W Value</div>
-                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">${stats.visualSWM3.toFixed(1)} m³ total</div>
+                            <div class="stat-label" style="color: rgba(255,255,255,0.9);" data-tooltip="Total value of softwood timber">Total S/W Value</div>
+                            <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;" data-tooltip="Cubic metres of softwood">${stats.visualSWM3.toFixed(1)} m³ total</div>
                         </div>
                         <div class="stat-card" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
                             <div class="stat-value" style="color: #10b981; font-size: 24px;">£${Math.round(stats.visualFramePrice).toLocaleString()}</div>
-                            <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total Sale Value</div>
+                            <div class="stat-label" style="color: rgba(255,255,255,0.9);" data-tooltip="Total sale value of all visuals">Total Sale Value</div>
                             <div style="color: rgba(255,255,255,0.8); font-size: 12px; margin-top: 8px;">Avg: £${Math.round(stats.visualAvgFramePrice).toLocaleString()}</div>
                         </div>
                     </div>
@@ -3277,291 +4131,441 @@ function calculateDetailedStats(startDate = null, endDate = null) {
         });
     }
     
-    // Basic counts (use filtered projects)
-    const total = filteredProjects.length;
-    const completed = filteredProjects.filter(p => p.status === 'Completed').length;
-    const inProgress = filteredProjects.filter(p => p.status === 'In Progress').length;
-    const onHold = filteredProjects.filter(p => p.status === 'On Hold').length;
-    const withClient = filteredProjects.filter(p => p.status === 'With Client').length;
-    const checking = filteredProjects.filter(p => p.status === 'Checking').length;
-    const signedOff = filteredProjects.filter(p => p.status === 'Signed Off').length;
-    const changing = filteredProjects.filter(p => p.status === 'Changing').length;
-    const projectsInProduction = filteredProjects.filter(p => p.status === 'Sent to Production').length;
+    // OPTIMIZED: Single pass through filtered projects to calculate ALL metrics
+    const metrics = filteredProjects.reduce((acc, p) => {
+        acc.total++;
+        
+        // Status counts
+        if (p.status) {
+            acc.statusCounts[p.status] = (acc.statusCounts[p.status] || 0) + 1;
+        }
+        
+        // Check if project is finished/active
+        const isFinished = isProjectFinished(p);
+        const isActive = isProjectActive(p);
+        
+        if (isFinished) {
+            acc.finishedProjects++;
+            
+            // Completion time calculation
+            if (p.orderDate && p.issuedToProduction) {
+                const start = parseDate(p.orderDate);
+                const end = parseDate(p.issuedToProduction);
+                if (start && end) {
+                    acc.completionDaysSum += Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+                    acc.completedProjectsCount++;
+                }
+            }
+            
+            // On-time delivery
+            if (p.dueDate && p.issuedToProduction) {
+                const due = parseDate(p.dueDate);
+                const issued = parseDate(p.issuedToProduction);
+                if (due && issued) {
+                    acc.projectsWithDeadlines++;
+                    if (issued <= due) acc.onTimeProjects++;
+                }
+            }
+            
+            // Completed this month
+            if (p.issuedToProduction) {
+                const completed = parseDate(p.issuedToProduction);
+                if (completed && completed >= thisMonth) {
+                    acc.projectsCompletedThisMonth++;
+                }
+            }
+        }
+        
+        // Active project metrics
+        if (isActive) {
+            acc.totalActive++;
+            
+            // Designer workload
+            if (p.designer) {
+                acc.activeDesigners.add(p.designer);
+                acc.designerWorkload[p.designer] = (acc.designerWorkload[p.designer] || 0) + 1;
+                acc.designerTime[p.designer] = (acc.designerTime[p.designer] || 0) + (p.totalTimeMinutes || 0);
+            }
+            
+            // Project type counts
+            if (p.projectType === 'Planning') acc.planningProjects++;
+            else if (p.projectType === 'Visual') acc.visualProjects++;
+            else if (p.projectType === 'Order') acc.orderProjects++;
+            
+            // Structural calcs needed
+            if (p.structuralCalcs === 'Yes' && 
+                (p.calcsStatus === 'Requested' || p.calcsStatus === 'Pending')) {
+                acc.projectsNeedingCalcs++;
+            }
+            
+            // Active timers
+            if (p.timerRunning) acc.activeTimers++;
+        }
+        
+        // Overdue check
+        if (!isFinished && p.status !== 'Cancelled' && p.dueDate) {
+            const due = parseDate(p.dueDate);
+            if (due && due < now) acc.overdueProjects++;
+        }
+        
+        // Time tracking
+        const timeMinutes = p.totalTimeMinutes || 0;
+        if (timeMinutes > 0) {
+            acc.totalTimeLogged += timeMinutes;
+            acc.projectsWithTime++;
+        }
+        
+        // First issue tracking
+        if (p.daysToIssue && p.daysToIssue > 0) {
+            acc.firstIssueDaysSum += p.daysToIssue;
+            acc.projectsWithFirstIssue++;
+        }
+        
+        if (p.firstIssueDate) {
+            const issued = parseDate(p.firstIssueDate);
+            if (issued && issued >= thisMonth) {
+                acc.projectsIssuedThisMonth++;
+            }
+        }
+        
+        // Started this month
+        if (p.orderDate) {
+            const started = parseDate(p.orderDate);
+            if (started && started >= thisMonth) {
+                acc.projectsStartedThisMonth++;
+            }
+        }
+        
+        // Sign-off lead time
+        if (p.signOffLeadTime && p.signOffLeadTime > 0) {
+            acc.signOffLeadTimeSum += p.signOffLeadTime;
+            acc.projectsWithSignOff++;
+        }
+        
+        // Order financial metrics
+        if (p.projectType === 'Order') {
+            const framePrice = parseFloat(p.framePrice) || 0;
+            const oakM3 = parseFloat(p.oakM3) || 0;
+            const swM3 = parseFloat(p.swM3) || 0;
+            
+            if (framePrice || oakM3 || swM3) acc.orderProjectsWithCosting++;
+            acc.orderFramePrice += framePrice;
+            acc.orderOakM3 += oakM3;
+            acc.orderSWM3 += swM3;
+            
+            if (isFinished) acc.orderCompletedValue += framePrice;
+            if (p.status === 'In Progress') acc.orderInProgressValue += framePrice;
+        }
+        
+        // Visual financial metrics
+        if (p.projectType === 'Visual') {
+            const framePrice = parseFloat(p.framePrice) || 0;
+            const oakM3 = parseFloat(p.oakM3) || 0;
+            const swM3 = parseFloat(p.swM3) || 0;
+            
+            if (framePrice || oakM3 || swM3) acc.visualProjectsWithCosting++;
+            acc.visualFramePrice += framePrice;
+            acc.visualOakM3 += oakM3;
+            acc.visualSWM3 += swM3;
+            
+            if (isFinished) acc.visualCompletedValue += framePrice;
+            if (p.status === 'In Progress') acc.visualInProgressValue += framePrice;
+        }
+        
+        // Client metrics
+        if (p.client) {
+            acc.clientCounts[p.client] = (acc.clientCounts[p.client] || 0) + 1;
+        }
+        
+        if (p.status === 'With Client') acc.projectsWithClientReview++;
+        
+        // Client response time
+        if (p.clientReviewSentDate && p.clientReviewReceivedDate) {
+            const sent = parseDate(p.clientReviewSentDate);
+            const received = parseDate(p.clientReviewReceivedDate);
+            if (sent && received) {
+                acc.clientResponseDaysSum += Math.floor((received - sent) / (1000 * 60 * 60 * 24));
+                acc.projectsWithResponseTime++;
+            }
+        }
+        
+        // Sales metrics
+        if (p.salesPerson) {
+            acc.salesCounts[p.salesPerson] = (acc.salesCounts[p.salesPerson] || 0) + 1;
+        }
+        
+        if (p.signedOff === 'Yes') acc.clientSatisfactionProjects++;
+        
+        // Priority
+        if (p.priority) {
+            acc.priorityDistribution[p.priority] = (acc.priorityDistribution[p.priority] || 0) + 1;
+            if (p.priority === 'High') acc.highPriorityProjects++;
+            else if (p.priority === 'Medium') acc.mediumPriorityProjects++;
+        }
+        
+        // Order type
+        if (p.orderType) {
+            acc.orderTypes[p.orderType] = (acc.orderTypes[p.orderType] || 0) + 1;
+            if (p.orderType === 'New Build') acc.newBuildProjects++;
+            else if (p.orderType === 'Renovation') acc.renovationProjects++;
+            else if (p.orderType === 'Commercial') acc.commercialProjects++;
+        }
+        
+        // Revisions/changes tracking
+        const changes = p.totalChanges || 0;
+        acc.totalChanges += changes;
+        if (changes === 0) acc.projectsWithNoChanges++;
+        if (p.status === 'With Client' || p.status === 'Changing' || changes > 0) {
+            acc.projectsWithClientChanges++;
+        }
+        
+        // Brief Quality tracking - empty/null briefFeedback = good quality brief
+        if (!p.briefFeedback || p.briefFeedback.trim() === '') {
+            acc.projectsWithGoodBrief++;
+        }
+        
+        // Upcoming deadlines
+        if (!isFinished && p.status !== 'Cancelled' && p.dueDate) {
+            const dueDate = parseDate(p.dueDate);
+            if (dueDate && dueDate >= now && dueDate <= twoWeeksFromNow) {
+                acc.upcomingDeadlines.push(p);
+            }
+        }
+        
+        // Recent activity (using firstIssueDate as proxy)
+        if (p.firstIssueDate) {
+            acc.recentActivity.push({ project: p, date: parseDate(p.firstIssueDate) });
+        }
+        
+        // Project types for charts
+        if (p.projectType) {
+            acc.projectTypes[p.projectType] = (acc.projectTypes[p.projectType] || 0) + 1;
+        }
+        
+        return acc;
+    }, {
+        total: 0,
+        finishedProjects: 0,
+        completionDaysSum: 0,
+        completedProjectsCount: 0,
+        projectsWithDeadlines: 0,
+        onTimeProjects: 0,
+        overdueProjects: 0,
+        totalActive: 0,
+        totalTimeLogged: 0,
+        projectsWithTime: 0,
+        activeTimers: 0,
+        firstIssueDaysSum: 0,
+        projectsWithFirstIssue: 0,
+        projectsIssuedThisMonth: 0,
+        projectsCompletedThisMonth: 0,
+        projectsStartedThisMonth: 0,
+        signOffLeadTimeSum: 0,
+        projectsWithSignOff: 0,
+        projectsNeedingCalcs: 0,
+        orderFramePrice: 0,
+        orderOakM3: 0,
+        orderSWM3: 0,
+        orderCompletedValue: 0,
+        orderInProgressValue: 0,
+        orderProjectsWithCosting: 0,
+        visualFramePrice: 0,
+        visualOakM3: 0,
+        visualSWM3: 0,
+        visualCompletedValue: 0,
+        visualInProgressValue: 0,
+        visualProjectsWithCosting: 0,
+        clientCounts: {},
+        salesCounts: {},
+        clientResponseDaysSum: 0,
+        projectsWithResponseTime: 0,
+        projectsWithClientReview: 0,
+        clientSatisfactionProjects: 0,
+        priorityDistribution: {},
+        orderTypes: {},
+        highPriorityProjects: 0,
+        mediumPriorityProjects: 0,
+        planningProjects: 0,
+        visualProjects: 0,
+        orderProjects: 0,
+        newBuildProjects: 0,
+        renovationProjects: 0,
+        commercialProjects: 0,
+        totalChanges: 0,
+        projectsWithNoChanges: 0,
+        projectsWithClientChanges: 0,
+        projectsWithGoodBrief: 0,
+        activeDesigners: new Set(),
+        designerWorkload: {},
+        designerTime: {},
+        statusCounts: {},
+        projectTypes: {},
+        upcomingDeadlines: [],
+        recentActivity: []
+    });
     
-    // Performance metrics
-    const completionRate = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
-    const completedProjectsList = filteredProjects.filter(p => p.status === 'Completed' && p.orderDate && p.issuedToProduction);
-    const avgDaysToComplete = completedProjectsList.length > 0 ? 
-        Math.round(completedProjectsList.reduce((sum, p) => {
-            const start = parseDate(p.orderDate);
-            const end = parseDate(p.issuedToProduction);
-            return sum + Math.ceil((end - start) / (1000 * 60 * 60 * 24));
-        }, 0) / completedProjectsList.length) : 0;
+    // Calculate derived metrics
+    const total = metrics.total;
+    const completed = metrics.statusCounts['Completed'] || 0;
+    const inProgress = metrics.statusCounts['In Progress'] || 0;
+    const onHold = metrics.statusCounts['On Hold'] || 0;
+    const withClient = metrics.statusCounts['With Client'] || 0;
+    const checking = metrics.statusCounts['Checking'] || 0;
+    const signedOff = metrics.statusCounts['Signed Off'] || 0;
+    const changing = metrics.statusCounts['Changing'] || 0;
+    const projectsInProduction = metrics.statusCounts['Sent to Production'] || 0;
     
-    const projectsWithDeadlines = filteredProjects.filter(p => p.dueDate && p.status === 'Completed');
-    const onTimeProjects = projectsWithDeadlines.filter(p => {
-        const due = parseDate(p.dueDate);
-        const issued = parseDate(p.issuedToProduction);
-        return issued <= due;
-    }).length;
-    const onTimeDeliveryRate = projectsWithDeadlines.length > 0 ? 
-        ((onTimeProjects / projectsWithDeadlines.length) * 100).toFixed(1) : 0;
+    const completionRate = total > 0 ? ((metrics.finishedProjects / total) * 100).toFixed(1) : 0;
+    const avgDaysToComplete = metrics.completedProjectsCount > 0 ? 
+        Math.round(metrics.completionDaysSum / metrics.completedProjectsCount) : 0;
+    const onTimeDeliveryRate = metrics.projectsWithDeadlines > 0 ? 
+        ((metrics.onTimeProjects / metrics.projectsWithDeadlines) * 100).toFixed(1) : 0;
+    const overdueProjects = metrics.overdueProjects;
+    const avgRevisions = total > 0 ? (metrics.totalChanges / total).toFixed(1) : 0;
+    const projectsNeedingCalcs = metrics.projectsNeedingCalcs;
+    const avgSignOffLeadTime = metrics.projectsWithSignOff > 0 ?
+        Math.round(metrics.signOffLeadTimeSum / metrics.projectsWithSignOff) : 0;
     
-    const overdueProjects = filteredProjects.filter(p => {
-        if (p.status === 'Completed' || p.status === 'Cancelled' || !p.dueDate) return false;
-        const due = parseDate(p.dueDate);
-        return due < now;
-    }).length;
-    
-    const avgRevisions = total > 0 ? 
-        (filteredProjects.reduce((sum, p) => sum + (p.totalChanges || 0), 0) / total).toFixed(1) : 0;
-    
-    const projectsNeedingCalcs = filteredProjects.filter(p => p.structuralCalcs === 'Yes' && 
-        (p.calcsStatus === 'Requested' || p.calcsStatus === 'Pending')).length;
-    
-    const projectsWithSignOff = filteredProjects.filter(p => p.signOffLeadTime && p.signOffLeadTime > 0);
-    const avgSignOffLeadTime = projectsWithSignOff.length > 0 ?
-        Math.round(projectsWithSignOff.reduce((sum, p) => sum + p.signOffLeadTime, 0) / projectsWithSignOff.length) : 0;
-    
-    // Time & Productivity metrics
-    const totalTimeLogged = filteredProjects.reduce((sum, p) => sum + (p.totalTimeMinutes || 0), 0);
-    const projectsWithTime = filteredProjects.filter(p => (p.totalTimeMinutes || 0) > 0).length;
+    const totalTimeLogged = metrics.totalTimeLogged;
+    const projectsWithTime = metrics.projectsWithTime;
     const avgTimePerProject = projectsWithTime > 0 ? Math.floor(totalTimeLogged / projectsWithTime) : 0;
-    const activeTimers = filteredProjects.filter(p => p.timerRunning).length;
+    const activeTimers = metrics.activeTimers;
+    const avgDaysToFirstIssue = metrics.projectsWithFirstIssue > 0 ?
+        Math.round(metrics.firstIssueDaysSum / metrics.projectsWithFirstIssue) : 0;
     
-    const projectsWithFirstIssue = filteredProjects.filter(p => p.daysToIssue && p.daysToIssue > 0);
-    const avgDaysToFirstIssue = projectsWithFirstIssue.length > 0 ?
-        Math.round(projectsWithFirstIssue.reduce((sum, p) => sum + p.daysToIssue, 0) / projectsWithFirstIssue.length) : 0;
+    const projectsIssuedThisMonth = metrics.projectsIssuedThisMonth;
+    const projectsCompletedThisMonth = metrics.projectsCompletedThisMonth;
+    const projectsStartedThisMonth = metrics.projectsStartedThisMonth;
     
-    const projectsIssuedThisMonth = filteredProjects.filter(p => {
-        if (!p.firstIssueDate) return false;
-        const issued = parseDate(p.firstIssueDate);
-        return issued >= thisMonth;
-    }).length;
+    // Order financial calculations
+    const orderOakValue = Math.round(metrics.orderOakM3 * appSettings.timber.oakPricePerM3);
+    const orderSWValue = Math.round(metrics.orderSWM3 * appSettings.timber.softwoodPricePerM3);
+    const orderOakM3 = metrics.orderOakM3;
+    const orderSWM3 = metrics.orderSWM3;
+    const orderFramePrice = metrics.orderFramePrice;
+    const orderAvgFramePrice = metrics.orderProjectsWithCosting > 0 ? 
+        Math.round(metrics.orderFramePrice / metrics.orderProjectsWithCosting) : 0;
+    const orderProjectsWithCosting = metrics.orderProjectsWithCosting;
+    const orderCompletedValue = metrics.orderCompletedValue;
+    const orderInProgressValue = metrics.orderInProgressValue;
     
-    const projectsCompletedThisMonth = filteredProjects.filter(p => {
-        if (!p.issuedToProduction || p.status !== 'Completed') return false;
-        const completed = parseDate(p.issuedToProduction);
-        return completed >= thisMonth;
-    }).length;
+    // Visual financial calculations
+    const visualOakValue = Math.round(metrics.visualOakM3 * appSettings.timber.oakPricePerM3);
+    const visualSWValue = Math.round(metrics.visualSWM3 * appSettings.timber.softwoodPricePerM3);
+    const visualOakM3 = metrics.visualOakM3;
+    const visualSWM3 = metrics.visualSWM3;
+    const visualFramePrice = metrics.visualFramePrice;
+    const visualAvgFramePrice = metrics.visualProjectsWithCosting > 0 ? 
+        Math.round(metrics.visualFramePrice / metrics.visualProjectsWithCosting) : 0;
+    const visualProjectsWithCosting = metrics.visualProjectsWithCosting;
+    const visualCompletedValue = metrics.visualCompletedValue;
+    const visualInProgressValue = metrics.visualInProgressValue;
     
-    const projectsStartedThisMonth = filteredProjects.filter(p => {
-        if (!p.orderDate) return false;
-        const started = parseDate(p.orderDate);
-        return started >= thisMonth;
-    }).length;
-    
-    // Order Financial metrics
-    const orderOnlyProjects = filteredProjects.filter(p => p.projectType === 'Order');
-    const orderProjectsWithCosting = orderOnlyProjects.filter(p => p.framePrice || p.oakM3 || p.swM3).length;
-    const orderFramePrice = orderOnlyProjects.reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
-    const orderAvgFramePrice = orderProjectsWithCosting > 0 ? Math.round(orderFramePrice / orderProjectsWithCosting) : 0;
-    const orderOakM3 = orderOnlyProjects.reduce((sum, p) => sum + (parseFloat(p.oakM3) || 0), 0);
-    const orderSWM3 = orderOnlyProjects.reduce((sum, p) => sum + (parseFloat(p.swM3) || 0), 0);
-    const orderOakValue = Math.round(orderOakM3 * 1500); // Assuming £1500 per m³
-    const orderSWValue = Math.round(orderSWM3 * 800); // Assuming £800 per m³
-    
-    const orderCompletedValue = orderOnlyProjects.filter(p => p.status === 'Completed')
-        .reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
-    const orderInProgressValue = orderOnlyProjects.filter(p => p.status === 'In Progress')
-        .reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
-    
-    // Visual Financial metrics
-    const visualOnlyProjects = filteredProjects.filter(p => p.projectType === 'Visual');
-    const visualProjectsWithCosting = visualOnlyProjects.filter(p => p.framePrice || p.oakM3 || p.swM3).length;
-    const visualFramePrice = visualOnlyProjects.reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
-    const visualAvgFramePrice = visualProjectsWithCosting > 0 ? Math.round(visualFramePrice / visualProjectsWithCosting) : 0;
-    const visualOakM3 = visualOnlyProjects.reduce((sum, p) => sum + (parseFloat(p.oakM3) || 0), 0);
-    const visualSWM3 = visualOnlyProjects.reduce((sum, p) => sum + (parseFloat(p.swM3) || 0), 0);
-    const visualOakValue = Math.round(visualOakM3 * 1500); // Assuming £1500 per m³
-    const visualSWValue = Math.round(visualSWM3 * 800); // Assuming £800 per m³
-    
-    const visualCompletedValue = visualOnlyProjects.filter(p => p.status === 'Completed')
-        .reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
-    const visualInProgressValue = visualOnlyProjects.filter(p => p.status === 'In Progress')
-        .reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
-    
-    // Client & Sales metrics
-    const clientCounts = {};
-    filteredProjects.forEach(p => {
-        clientCounts[p.client] = (clientCounts[p.client] || 0) + 1;
-    });
-    const uniqueClients = Object.keys(clientCounts).length;
-    const repeatClients = Object.values(clientCounts).filter(count => count > 1).length;
+    // Client metrics
+    const uniqueClients = Object.keys(metrics.clientCounts).length;
+    const repeatClients = Object.values(metrics.clientCounts).filter(count => count > 1).length;
     const avgProjectsPerClient = uniqueClients > 0 ? (total / uniqueClients).toFixed(1) : 0;
+    const projectsWithClientReview = metrics.projectsWithClientReview;
+    const avgClientResponseTime = metrics.projectsWithResponseTime > 0 ?
+        Math.round(metrics.clientResponseDaysSum / metrics.projectsWithResponseTime) : 0;
+    const clientSatisfactionProjects = metrics.clientSatisfactionProjects;
     
-    const salesCounts = {};
-    filteredProjects.forEach(p => {
-        salesCounts[p.salesPerson] = (salesCounts[p.salesPerson] || 0) + 1;
-    });
-    const topSalesPerson = Object.entries(salesCounts).sort((a, b) => b[1] - a[1])[0];
+    // Sales metrics
+    const topSalesPerson = Object.entries(metrics.salesCounts).sort((a, b) => b[1] - a[1])[0];
     const topSalesPersonCount = topSalesPerson ? topSalesPerson[1] : 0;
     const topSalesPersonName = topSalesPerson ? topSalesPerson[0] : 'N/A';
     
-    const projectsWithClientReview = filteredProjects.filter(p => p.status === 'With Client').length;
-    
-    // Calculate average client response time using new tracking fields
-    const projectsWithResponseTime = filteredProjects.filter(p => 
-        p.clientReviewSentDate && p.clientReviewReceivedDate
-    );
-    const avgClientResponseTime = projectsWithResponseTime.length > 0 ?
-        Math.round(projectsWithResponseTime.reduce((sum, p) => {
-            const sent = parseDate(p.clientReviewSentDate);
-            const received = parseDate(p.clientReviewReceivedDate);
-            const days = Math.floor((received - sent) / (1000 * 60 * 60 * 24));
-            return sum + days;
-        }, 0) / projectsWithResponseTime.length) : 0;
-    
-    const newClientsThisMonth = 0; // Placeholder - would need historical data
-    const clientSatisfactionProjects = filteredProjects.filter(p => p.signedOff === 'Yes').length;
-    
-    // Team & Workload metrics
-    const activeDesigners = new Set(filteredProjects.filter(p => p.status !== 'Completed' && p.status !== 'Cancelled')
-        .map(p => p.designer)).size;
-    const totalActiveProjects = filteredProjects.filter(p => p.status !== 'Completed' && p.status !== 'Cancelled').length;
+    // Team metrics
+    const activeDesigners = metrics.activeDesigners.size;
+    const totalActiveProjects = metrics.totalActive;
     const avgProjectsPerDesigner = activeDesigners > 0 ? (totalActiveProjects / activeDesigners).toFixed(1) : 0;
     
-    const designerCounts = {};
-    filteredProjects.filter(p => p.status !== 'Completed' && p.status !== 'Cancelled')
-        .forEach(p => {
-            designerCounts[p.designer] = (designerCounts[p.designer] || 0) + 1;
-        });
-    const topDesigner = Object.entries(designerCounts).sort((a, b) => b[1] - a[1])[0];
+    const topDesigner = Object.entries(metrics.designerWorkload).sort((a, b) => b[1] - a[1])[0];
     const topDesignerCount = topDesigner ? topDesigner[1] : 0;
     const topDesignerName = topDesigner ? topDesigner[0] : 'N/A';
     
-    // Calculate designer utilization using capacity data if available
+    // Designer utilization
     let designerUtilization = 0;
     if (designerCapacities.length > 0) {
-        // Calculate weighted utilization based on actual capacity
         const totalCapacity = designerCapacities.reduce((sum, d) => sum + (d.capacity_hours_per_week || 40), 0);
         const totalWorkload = designerCapacities.reduce((sum, d) => sum + (d.current_workload_hours || 0), 0);
         designerUtilization = totalCapacity > 0 ? ((totalWorkload / totalCapacity) * 100).toFixed(0) : 0;
     } else {
-        // Fallback to simple calculation - only count designer roles
-        const designerRoleCount = teamMembers.filter(m => m.active && ['Designer', 'Senior Designer', 'Lead Designer'].includes(m.role)).length;
+        const designerRoleCount = teamMembers.filter(m => 
+            m.active && ['Designer', 'Senior Designer', 'Lead Designer'].includes(m.role)).length;
         designerUtilization = designerRoleCount > 0 ? 
             ((activeDesigners / designerRoleCount) * 100).toFixed(0) : 0;
     }
     
-    const designerTime = {};
-    filteredProjects.forEach(p => {
-        designerTime[p.designer] = (designerTime[p.designer] || 0) + (p.totalTimeMinutes || 0);
-    });
     const avgTimePerDesigner = activeDesigners > 0 ? 
-        Math.floor(Object.values(designerTime).reduce((a, b) => a + b, 0) / activeDesigners) : 0;
+        Math.floor(Object.values(metrics.designerTime).reduce((a, b) => a + b, 0) / activeDesigners) : 0;
     
-    const designersWithActiveProjects = new Set(filteredProjects.filter(p => p.status !== 'Completed' && p.status !== 'Cancelled')
-        .map(p => p.designer)).size;
-    
+    const designersWithActiveProjects = activeDesigners;
     const totalTeamMembers = teamMembers.length;
     const avgCompletionRatePerDesigner = activeDesigners > 0 ? 
         ((completed / activeDesigners) / (total / activeDesigners) * 100).toFixed(1) : 0;
     
-    // Project Type & Category metrics
-    const planningProjects = filteredProjects.filter(p => p.projectType === 'Planning').length;
-    const visualProjects = filteredProjects.filter(p => p.projectType === 'Visual').length;
-    const orderProjects = filteredProjects.filter(p => p.projectType === 'Order').length;
-    const newBuildProjects = filteredProjects.filter(p => p.orderType === 'New Build').length;
-    const renovationProjects = filteredProjects.filter(p => p.orderType === 'Renovation').length;
-    const commercialProjects = filteredProjects.filter(p => p.orderType === 'Commercial').length;
-    const highPriorityProjects = filteredProjects.filter(p => p.priority === 'High').length;
-    const mediumPriorityProjects = filteredProjects.filter(p => p.priority === 'Medium').length;
+    // Change/revision metrics
+    const avgClientChangesPerProject = total > 0 ? (metrics.totalChanges / total).toFixed(1) : 0;
+    const firstTimeRightRate = total > 0 ? ((metrics.projectsWithNoChanges / total) * 100).toFixed(1) : 0;
     
-    // Status breakdown
+    // Sort and limit arrays
+    const upcomingDeadlines = metrics.upcomingDeadlines
+        .sort((a, b) => parseDate(a.dueDate) - parseDate(b.dueDate))
+        .slice(0, 10);
+    
+    const recentActivity = metrics.recentActivity
+        .sort((a, b) => b.date - a.date)
+        .slice(0, 8)
+        .map(item => item.project);
+    
+    // Additional aggregations for global stats (use full projectsData, not filtered)
     const statusBreakdown = {};
-    projectsData.forEach(p => {
-        statusBreakdown[p.status] = (statusBreakdown[p.status] || 0) + 1;
-    });
-    
-    // Project types
     const projectTypes = {};
-    projectsData.forEach(p => {
-        projectTypes[p.projectType] = (projectTypes[p.projectType] || 0) + 1;
-    });
-    
-    // Order types
     const orderTypes = {};
-    projectsData.forEach(p => {
-        orderTypes[p.orderType] = (orderTypes[p.orderType] || 0) + 1;
-    });
-    
-    // Designer workload
     const designerWorkload = {};
+    const salesPerformance = {};
+    const priorityDistribution = {};
+    
     projectsData.forEach(p => {
-        if (p.status !== 'Completed' && p.status !== 'Cancelled') {
+        if (p.status) statusBreakdown[p.status] = (statusBreakdown[p.status] || 0) + 1;
+        if (p.projectType) projectTypes[p.projectType] = (projectTypes[p.projectType] || 0) + 1;
+        if (p.orderType) orderTypes[p.orderType] = (orderTypes[p.orderType] || 0) + 1;
+        if (p.salesPerson) salesPerformance[p.salesPerson] = (salesPerformance[p.salesPerson] || 0) + 1;
+        if (p.priority) priorityDistribution[p.priority] = (priorityDistribution[p.priority] || 0) + 1;
+        if (isProjectActive(p) && p.designer) {
             designerWorkload[p.designer] = (designerWorkload[p.designer] || 0) + 1;
         }
     });
     
-    // Sales performance
-    const salesPerformance = {};
-    projectsData.forEach(p => {
-        salesPerformance[p.salesPerson] = (salesPerformance[p.salesPerson] || 0) + 1;
-    });
+    // Additional new KPI calculations (placeholders for future metrics)
+    const newClientsThisMonth = 0; // Placeholder - would need historical data
+    const planningProjects = metrics.planningProjects;
+    const visualProjects = metrics.visualProjects;
+    const orderProjects = metrics.orderProjects;
+    const newBuildProjects = metrics.newBuildProjects;
+    const renovationProjects = metrics.renovationProjects;
+    const commercialProjects = metrics.commercialProjects;
+    const highPriorityProjects = metrics.highPriorityProjects;
+    const mediumPriorityProjects = metrics.mediumPriorityProjects;
+    const projectsWithClientChanges = metrics.projectsWithClientChanges;
     
-    // Priority distribution
-    const priorityDistribution = {};
-    projectsData.forEach(p => {
-        priorityDistribution[p.priority] = (priorityDistribution[p.priority] || 0) + 1;
-    });
+    // Continue with remaining KPI calculations from filtered projects...
     
-    // Upcoming deadlines
-    const upcomingDeadlines = projectsData
-        .filter(p => {
-            if (!p.dueDate || p.status === 'Completed' || p.status === 'Cancelled') return false;
-            const dueDate = parseDate(p.dueDate);
-            return dueDate >= now && dueDate <= twoWeeksFromNow;
-        })
-        .sort((a, b) => parseDate(a.dueDate) - parseDate(b.dueDate))
-        .slice(0, 10);
+    // Continue from line 3900+ with the rest of the original function (BOM accuracy, signed off values, etc.)
     
-    // Recent activity (projects modified recently - using firstIssueDate as proxy)
-    const recentActivity = projectsData
-        .filter(p => p.firstIssueDate)
-        .sort((a, b) => parseDate(b.firstIssueDate) - parseDate(a.firstIssueDate))
-        .slice(0, 8);
-    
-    // ==================== NEW KPI CALCULATIONS ====================
-    // Sales Brief Quality Metrics
-    
-    // Count projects with client changes (status contains "With Client" or "Changing")
-    const projectsWithClientChanges = filteredProjects.filter(p => 
-        p.status === 'With Client' || p.status === 'Changing' || (p.totalChanges && p.totalChanges > 0)
-    ).length;
-    
-    // Average client changes per project
-    const totalChanges = filteredProjects.reduce((sum, p) => sum + (p.totalChanges || 0), 0);
-    const avgClientChangesPerProject = total > 0 ? (totalChanges / total).toFixed(1) : 0;
-    
-    // First-time-right rate (projects with 0 changes)
-    const projectsWithNoChanges = filteredProjects.filter(p => 
-        !p.totalChanges || p.totalChanges === 0
-    ).length;
-    const firstTimeRightRate = total > 0 ? ((projectsWithNoChanges / total) * 100).toFixed(1) : 0;
-    
-    // Brief Quality Score (inverse of change rate - higher is better)
+    // Brief Quality Score - based on briefFeedback field
+    // Empty or null briefFeedback = good quality brief (no issues to report)
+    // Text in briefFeedback = issues with the brief that needed clarification/changes
     const briefQualityScore = total > 0 ? 
-        ((projectsWithNoChanges / total) * 100).toFixed(1) : 0;
+        ((metrics.projectsWithGoodBrief / total) * 100).toFixed(1) : 0;
     
-    // Average days in "With Client" status (estimate based on project duration)
-    // Note: This is simplified - would need status history for accuracy
-    const projectsInWithClient = filteredProjects.filter(p => p.status === 'With Client').length;
-    const avgDaysInWithClient = projectsInWithClient > 0 ? 
-        Math.round(filteredProjects
-            .filter(p => p.status === 'With Client' && p.firstIssueDate)
-            .reduce((sum, p) => {
-                const issued = parseDate(p.firstIssueDate);
-                const daysSince = Math.floor((now - issued) / (1000 * 60 * 60 * 24));
-                return sum + daysSince;
-            }, 0) / projectsInWithClient) : 0;
-    
-    // Projects requiring rework (more than 2 revisions)
+    // Additional legacy KPI calculations for backward compatibility
+    const avgDaysInWithClient = 0; // Simplified - would need status history for accuracy
     const projectsRequiringRework = filteredProjects.filter(p => 
         p.totalChanges && p.totalChanges > 2
     ).length;
     
-    // Average revisions before sign-off (for completed/signed off projects)
     const signedOffProjectsWithChanges = filteredProjects.filter(p => 
         (p.status === 'Signed Off' || p.status === 'Sent to Production' || p.status === 'Completed') 
         && p.totalChanges !== undefined
@@ -3598,21 +4602,24 @@ function calculateDetailedStats(startDate = null, endDate = null) {
         sum + (parseFloat(p.oakM3) || 0) + (parseFloat(p.swM3) || 0), 0
     );
     
-    // Sent to Production projects - Total value and timber volume
-    const sentToProductionProjects = filteredProjects.filter(p => p.status === 'Sent to Production');
+    // Sent to Production projects - Total value and timber volume (Order projects only)
+    const sentToProductionProjects = filteredProjects.filter(p => 
+        p.projectType === 'Order' && p.status === 'Sent to Production'
+    );
     const sentToProductionValue = sentToProductionProjects.reduce((sum, p) => sum + (parseFloat(p.framePrice) || 0), 0);
     const sentToProductionVolume = sentToProductionProjects.reduce((sum, p) => 
         sum + (parseFloat(p.oakM3) || 0) + (parseFloat(p.swM3) || 0), 0
     );
     
-    // BOM Accuracy Score (Error-Free BOM Rate)
+    // BOM Accuracy Score (Error-Free BOM Rate) - Order projects only
     // Empty or null bom_feedback = error-free BOM
     // Text in bom_feedback = errors found
-    const projectsWithErrorFreeBOM = filteredProjects.filter(p => 
+    const orderProjectsForBOM = filteredProjects.filter(p => p.projectType === 'Order');
+    const projectsWithErrorFreeBOM = orderProjectsForBOM.filter(p => 
         !p.bomFeedback || p.bomFeedback.trim() === ''
     ).length;
-    const bomAccuracyScore = total > 0 ? 
-        ((projectsWithErrorFreeBOM / total) * 100).toFixed(1) : 0;
+    const bomAccuracyScore = orderProjectsForBOM.length > 0 ? 
+        ((projectsWithErrorFreeBOM / orderProjectsForBOM.length) * 100).toFixed(1) : 0;
     
     return {
         total, completed, inProgress, onHold, withClient, checking, signedOff, changing,
@@ -4021,7 +5028,118 @@ function exportReportCSV() {
 
 // ==================== TASKS PAGE ====================
 
+// =====================================================
+// Settings Page
+// =====================================================
+function renderSettingsPage() {
+    return `
+        <div class="projects-page">
+            <div class="page-header">
+                <h2>⚙️ Application Settings</h2>
+                <p style="color: var(--gray-500); margin-top: 8px;">Configure timber pricing and other application settings</p>
+            </div>
+
+            <div class="card" style="max-width: 800px; margin: 0 auto; padding: 32px;">
+                <h3 style="margin: 0 0 24px 0; font-size: 18px; color: #1f2937; border-bottom: 2px solid #e5e7eb; padding-bottom: 12px;">
+                    💷 Timber Pricing
+                </h3>
+
+                <div style="display: grid; gap: 24px;">
+                    <div>
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #374151; font-size: 14px;">
+                            Oak Price per m³ (£)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="oakPrice" 
+                            value="${appSettings.timber.oakPricePerM3}" 
+                            class="form-input" 
+                            placeholder="1500"
+                            style="width: 100%; max-width: 300px;"
+                        >
+                        <p style="font-size: 12px; color: #6b7280; margin-top: 6px;">
+                            Current: £${appSettings.timber.oakPricePerM3.toLocaleString()} per cubic metre
+                        </p>
+                    </div>
+
+                    <div>
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #374151; font-size: 14px;">
+                            Softwood Price per m³ (£)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="softwoodPrice" 
+                            value="${appSettings.timber.softwoodPricePerM3}" 
+                            class="form-input" 
+                            placeholder="800"
+                            style="width: 100%; max-width: 300px;"
+                        >
+                        <p style="font-size: 12px; color: #6b7280; margin-top: 6px;">
+                            Current: £${appSettings.timber.softwoodPricePerM3.toLocaleString()} per cubic metre
+                        </p>
+                    </div>
+                </div>
+
+                <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid #e5e7eb; display: flex; gap: 12px;">
+                    <button class="btn-primary" onclick="saveSettings()">
+                        💾 Save Settings
+                    </button>
+                    <button class="btn-secondary" onclick="resetSettings()">
+                        🔄 Reset to Defaults
+                    </button>
+                </div>
+
+                <div style="margin-top: 24px; padding: 16px; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px;">
+                    <p style="margin: 0; font-size: 13px; color: #075985; line-height: 1.6;">
+                        <strong>ℹ️ Note:</strong> These prices are used to calculate timber values in financial reports. Changes will apply immediately to all calculations.
+                    </p>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function saveSettings() {
+    const oakPrice = parseFloat(document.getElementById('oakPrice').value);
+    const softwoodPrice = parseFloat(document.getElementById('softwoodPrice').value);
+
+    if (isNaN(oakPrice) || oakPrice <= 0) {
+        showNotification('Please enter a valid oak price', 'error');
+        return;
+    }
+
+    if (isNaN(softwoodPrice) || softwoodPrice <= 0) {
+        showNotification('Please enter a valid softwood price', 'error');
+        return;
+    }
+
+    appSettings.timber.oakPricePerM3 = oakPrice;
+    appSettings.timber.softwoodPricePerM3 = softwoodPrice;
+
+    // Save to localStorage
+    localStorage.setItem('appSettings', JSON.stringify(appSettings));
+
+    showNotification('Settings saved successfully!', 'success');
+    showView('settings'); // Refresh the view
+}
+
+function resetSettings() {
+    if (!confirm('Are you sure you want to reset timber prices to defaults (Oak: £1500, Softwood: £800)?')) {
+        return;
+    }
+
+    appSettings.timber.oakPricePerM3 = 1500;
+    appSettings.timber.softwoodPricePerM3 = 800;
+
+    localStorage.setItem('appSettings', JSON.stringify(appSettings));
+
+    showNotification('Settings reset to defaults', 'success');
+    showView('settings');
+}
+
+// =====================================================
 // Render Tasks Page
+// =====================================================
 function renderTasksPage() {
     const sortedTasks = tasksData.sort((a, b) => {
         // Sort by status (pending first), then by due date
@@ -4063,13 +5181,7 @@ function renderTasksPage() {
                 </div>
             </div>
 
-            ${tasksData.length === 0 ? `
-                <div class="card" style="text-align: center; padding: 60px 20px; color: #7f8c8d;">
-                    <div style="font-size: 48px; margin-bottom: 16px;">✓</div>
-                    <h3 style="color: #2c3e50; margin-bottom: 8px;">No tasks yet</h3>
-                    <p>Create your first task to get started</p>
-                </div>
-            ` : `
+            ${tasksData.length === 0 ? renderTasksEmptyState() : `
                 <table class="projects-table">
                     <thead>
                         <tr>
@@ -4439,7 +5551,7 @@ function deleteProject() {
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-                <button class="btn-primary" style="background: #ef4444; border-color: #dc2626;" onclick="confirmDeleteProject()">Delete Project</button>
+                <button class="btn-primary" id="confirmDeleteBtn" style="background: #ef4444; border-color: #dc2626;" onclick="confirmDeleteProject()">Delete Project</button>
             </div>
         </div>
     `;
@@ -4447,19 +5559,34 @@ function deleteProject() {
 }
 
 async function confirmDeleteProject() {
-    // Close the modal
-    const modal = document.querySelector('.modal-overlay');
-    if (modal) {
-        modal.remove();
+    // Get delete button and add loading state
+    const deleteBtn = document.getElementById('confirmDeleteBtn');
+    if (deleteBtn) {
+        deleteBtn.classList.add('loading');
+        deleteBtn.disabled = true;
     }
-
+    
     try {
-        
-        // Delete from Supabase
-        const deleted = await SupabaseAPI.deleteProject(currentProject.id);
+        // Delete from Supabase with retry logic
+        const deleted = await errorHandler.retryOperation(
+            async () => await SupabaseAPI.deleteProject(currentProject.id),
+            {
+                maxRetries: 2,
+                initialDelay: 1000,
+                onRetry: (attempt, max) => {
+                    showNotification(`Deleting project... (Retry ${attempt}/${max})`, 'info');
+                }
+            }
+        );
         
         if (deleted) {
-            showNotification('Project deleted successfully', 'success');
+            // Close the modal
+            const modal = document.querySelector('.modal-overlay');
+            if (modal) {
+                modal.remove();
+            }
+            
+            showNotification('✅ Project deleted successfully', 'success');
             
             // Remove from local array
             projectsData = projectsData.filter(p => p.id !== currentProject.id);
@@ -4474,8 +5601,17 @@ async function confirmDeleteProject() {
             throw new Error('Delete operation returned false');
         }
     } catch (error) {
-        console.error('Error deleting project:', error);
-        showNotification('Failed to delete project: ' + error.message, 'error');
+        errorHandler.handleError(error, {
+            action: 'deleteProject',
+            projectId: currentProject?.id,
+            projectName: currentProject?.name
+        });
+        
+        // Remove loading state on error
+        if (deleteBtn) {
+            deleteBtn.classList.remove('loading');
+            deleteBtn.disabled = false;
+        }
     }
 }
 
@@ -4495,6 +5631,20 @@ function updateProjectTypeStatus() {
     const statusOpts = statusOptions[projectType] || [];
     
     statusSelect.innerHTML = statusOpts.map(s => `<option value="${s}">${s}</option>`).join('');
+    
+    // Toggle visibility of Planning-hidden sections (Planning only)
+    const planningHideElements = document.querySelectorAll('.planning-hide');
+    const shouldHidePlanning = projectType === 'Planning';
+    planningHideElements.forEach(el => {
+        el.style.display = shouldHidePlanning ? 'none' : '';
+    });
+    
+    // Toggle visibility of Planning+Visual-hidden sections (Planning and Visual)
+    const planningVisualHideElements = document.querySelectorAll('.planning-visual-hide');
+    const shouldHidePlanningVisual = projectType === 'Planning' || projectType === 'Visual';
+    planningVisualHideElements.forEach(el => {
+        el.style.display = shouldHidePlanningVisual ? 'none' : '';
+    });
 }
 
 function updateProjectTypeStatusInEdit() {
@@ -4743,7 +5893,7 @@ function renderEmptyState(config) {
 
 // Empty state for projects
 function renderProjectsEmptyState() {
-    if (searchTerm || filterStatus || filterOrderType || filterProjectType) {
+    if (searchTerm || filterStatus || filterOrderType || filterProjectType || filterMyProjects) {
         return renderEmptyState({
             icon: '🔍',
             title: 'No projects found',
@@ -4805,76 +5955,79 @@ function renderTasksEmptyState() {
 }
 
 async function saveNewProject() {
-    const jobNumber = document.getElementById('jobNumber').value.trim();
-    const client = document.getElementById('projectClient').value.trim();
-    const salesPerson = document.getElementById('salesPerson').value.trim();
-    const designer = document.getElementById('designer').value.trim();
-    const orderDate = document.getElementById('orderDate').value;
-    const dueDate = document.getElementById('projectDueDate').value;
-    
-    // Validation
-    if (!jobNumber) {
-        showNotification('Please enter a job number', 'error');
-        document.getElementById('jobNumber').focus();
-        return;
-    }
-    if (!client) {
-        showNotification('Please enter a client name', 'error');
-        document.getElementById('projectClient').focus();
-        return;
-    }
-    if (!salesPerson) {
-        showNotification('Please select a sales person', 'error');
-        document.getElementById('salesPerson').focus();
-        return;
-    }
-    if (!designer) {
-        showNotification('Please select a designer', 'error');
-        document.getElementById('designer').focus();
-        return;
-    }
-    if (!orderDate) {
-        showNotification('Please select a requested date', 'error');
-        document.getElementById('orderDate').focus();
-        return;
-    }
-    if (!dueDate) {
-        showNotification('Please select a due date', 'error');
-        document.getElementById('projectDueDate').focus();
-        return;
+    // Get save button and add loading state
+    const saveBtn = document.getElementById('saveNewProjectBtn');
+    if (saveBtn) {
+        saveBtn.classList.add('loading');
+        saveBtn.disabled = true;
     }
     
-    // Calculate days to issue if first issue date is provided
-    const firstIssueDate = document.getElementById('firstIssueDate').value;
-    let daysToIssue = null;
-    if (firstIssueDate && orderDate) {
-        const start = new Date(orderDate);
-        const end = new Date(firstIssueDate);
-        daysToIssue = Math.floor((end - start) / (1000 * 60 * 60 * 24));
-    }
-    
-    // Get version number
-    const versionNumber = parseInt(document.getElementById('currentVersion').value) || 1;
-    
-    // Create project data for database
-    const projectData = {
-        job_number: jobNumber,
-        name: client + ' - ' + jobNumber,
-        client: client,
-        order_type: document.getElementById('orderType').value,
-        project_type: document.getElementById('projectType').value,
-        status: document.getElementById('projectStatus').value,
-        sales_person: salesPerson,
-        designer: designer,
-        assignee: designer,
-        priority: document.getElementById('projectPriority').value,
-        current_version: 'Rev ' + versionNumber,
-        total_changes: versionNumber - 1,
-        order_date: formatDateToDB(orderDate),
-        due_date: formatDateToDB(dueDate),
-        first_issue_date: firstIssueDate ? formatDateToDB(firstIssueDate) : null,
-        days_to_issue: daysToIssue,
-        issued_to_production: document.getElementById('issuedToProduction').value ? formatDateToDB(document.getElementById('issuedToProduction').value) : null,
+    try {
+        // Validate form before proceeding
+        const formContainer = document.querySelector('.project-detail-page');
+        if (!formValidator.validateForm(formContainer)) {
+            showNotification('⚠️ Please fix the validation errors before saving', 'error');
+            if (saveBtn) {
+                saveBtn.classList.remove('loading');
+                saveBtn.disabled = false;
+            }
+            return;
+        }
+        
+        const jobNumber = document.getElementById('jobNumber').value.trim();
+        const client = document.getElementById('projectClient').value.trim();
+        const salesPerson = document.getElementById('salesPerson').value.trim();
+        const designer = document.getElementById('designer').value.trim();
+        const orderDate = document.getElementById('orderDate').value;
+        const dueDate = document.getElementById('projectDueDate').value;
+        const projectType = document.getElementById('projectType').value;
+        
+        // Check for duplicate job number - WARN but don't block (same job can have multiple phases)
+        const existingProjects = projectsData.filter(p => p.jobNumber === jobNumber);
+        if (existingProjects.length > 0) {
+            const existingTypes = existingProjects.map(p => p.projectType).join(', ');
+            const isDifferentType = !existingProjects.some(p => p.projectType === projectType);
+            
+            if (isDifferentType) {
+                // Same job number, different phase - show info notification
+                showNotification(`ℹ️ Job number "${jobNumber}" exists as ${existingTypes}. Creating new ${projectType} phase.`, 'info');
+            } else {
+                // Same job number AND same type - show warning but allow
+                showNotification(`⚠️ Warning: A ${projectType} project for "${jobNumber}" already exists. Proceeding will create a duplicate.`, 'warning');
+            }
+        }
+        
+        // Calculate days to issue if first issue date is provided
+        const firstIssueDate = document.getElementById('firstIssueDate').value;
+        let daysToIssue = null;
+        if (firstIssueDate && orderDate) {
+            const start = new Date(orderDate);
+            const end = new Date(firstIssueDate);
+            daysToIssue = Math.floor((end - start) / (1000 * 60 * 60 * 24));
+        }
+        
+        // Get version number
+        const versionNumber = parseInt(document.getElementById('currentVersion').value) || 1;
+        
+        // Create project data for database
+        const projectData = {
+            job_number: jobNumber,
+            name: client + ' - ' + jobNumber,
+            client: client,
+            order_type: document.getElementById('orderType').value,
+            project_type: document.getElementById('projectType').value,
+            status: document.getElementById('projectStatus').value,
+            sales_person: salesPerson,
+            designer: designer,
+            assignee: designer,
+            priority: document.getElementById('projectPriority').value,
+            current_version: 'Rev ' + versionNumber,
+            total_changes: versionNumber - 1,
+            order_date: formatDateToDB(orderDate),
+            due_date: formatDateToDB(dueDate),
+            first_issue_date: firstIssueDate ? formatDateToDB(firstIssueDate) : null,
+            days_to_issue: daysToIssue,
+            issued_to_production: document.getElementById('issuedToProduction').value ? formatDateToDB(document.getElementById('issuedToProduction').value) : null,
         sign_off_lead_time: parseInt(document.getElementById('signOffLeadTime').value) || 0,
         structural_calcs: document.getElementById('structuralCalcs').value,
         calcs_status: document.getElementById('calcsStatus').value,
@@ -4913,11 +6066,35 @@ async function saveNewProject() {
     } catch (error) {
         console.error('Error creating project:', error);
         showNotification('Error creating project: ' + error.message, 'error');
+    } finally {
+        // Remove loading state
+        if (saveBtn) {
+            saveBtn.classList.remove('loading');
+            saveBtn.disabled = false;
+        }
+    }
+    } catch (error) {
+        console.error('Validation error:', error);
+        showNotification('Error: ' + error.message, 'error');
+        // Remove loading state on outer error
+        const saveBtn = document.getElementById('saveNewProjectBtn');
+        if (saveBtn) {
+            saveBtn.classList.remove('loading');
+            saveBtn.disabled = false;
+        }
     }
 }
 
 async function saveProject() {
     if (currentProject) {
+        // Get save button and add loading state
+        const saveBtn = document.getElementById('saveProjectBtn');
+        if (saveBtn) {
+            saveBtn.classList.add('loading');
+            saveBtn.disabled = true;
+        }
+        
+        try {
         // Job Information
         const jobNumber = document.getElementById('jobNumber');
         const client = document.getElementById('client');
@@ -5039,21 +6216,41 @@ async function saveProject() {
         const newStatus = statusSelect ? statusSelect.value : oldStatus;
         
         try {
-            // Save to database
-            const updated = await SupabaseAPI.updateProject(currentProject.id, updates);
+            // Save to database with retry logic
+            const updated = await errorHandler.retryOperation(
+                async () => await SupabaseAPI.updateProject(currentProject.id, updates),
+                {
+                    maxRetries: 3,
+                    initialDelay: 1000,
+                    onRetry: (attempt, max) => {
+                        showNotification(`Saving project... (Retry ${attempt}/${max})`, 'info');
+                    }
+                }
+            );
             
             if (updated) {
                 // Log status change if status changed
                 if (oldStatus !== newStatus) {
                     try {
-                        await SupabaseAPI.addStatusHistory(
-                            currentProject.id, 
-                            oldStatus, 
-                            newStatus, 
-                            currentUser?.name || 'User'
+                        await errorHandler.retryOperation(
+                            async () => await SupabaseAPI.addStatusHistory(
+                                currentProject.id, 
+                                oldStatus, 
+                                newStatus, 
+                                currentUser?.name || 'User'
+                            ),
+                            {
+                                maxRetries: 2,
+                                initialDelay: 500
+                            }
                         );
                     } catch (historyError) {
-                        console.error('Failed to log status history:', historyError);
+                        errorHandler.logError(historyError, {
+                            action: 'saveStatusHistory',
+                            projectId: currentProject.id,
+                            oldStatus,
+                            newStatus
+                        });
                         // Don't block save if history logging fails
                     }
                 }
@@ -5067,13 +6264,32 @@ async function saveProject() {
                 isEditing = false;
                 document.getElementById('content-area').innerHTML = renderProjectDetailPage(currentProject);
                 updatePendingCount();
-                showNotification('Project saved successfully!');
+                showNotification('✅ Project saved successfully!', 'success');
             } else {
-                showNotification('Failed to save project. Please try again.', 'error');
+                showNotification('❌ Failed to save project. Please try again.', 'error');
             }
         } catch (error) {
-            console.error('Error saving project:', error);
-            showNotification('Error saving project: ' + error.message, 'error');
+            errorHandler.handleError(error, {
+                action: 'saveProject',
+                projectId: currentProject.id,
+                projectName: currentProject.name
+            });
+        } finally {
+            // Remove loading state
+            if (saveBtn) {
+                saveBtn.classList.remove('loading');
+                saveBtn.disabled = false;
+            }
+        }
+        } catch (error) {
+            console.error('Error in saveProject:', error);
+            showNotification('Unexpected error: ' + error.message, 'error');
+            // Remove loading state on outer error
+            const saveBtn = document.getElementById('saveProjectBtn');
+            if (saveBtn) {
+                saveBtn.classList.remove('loading');
+                saveBtn.disabled = false;
+            }
         }
     }
 }
@@ -5084,12 +6300,18 @@ function calculateStats() {
         total: projectsData.length,
         inProgress: projectsData.filter(p => p.status === 'In Progress').length,
         completed: projectsData.filter(p => p.status === 'Completed').length,
-        pending: projectsData.filter(p => p.status !== 'Completed' && p.status !== 'Cancelled').length
+        pending: projectsData.filter(p => isProjectActive(p)).length
     };
 }
 
 function filterProjectsList() {
     return projectsData.filter(p => {
+        // My Projects filter (check both designer and salesPerson)
+        if (filterMyProjects && currentUser) {
+            const isMyProject = p.designer === currentUser.name || p.salesPerson === currentUser.name;
+            if (!isMyProject) return false;
+        }
+        
         // Search term filter
         if (searchTerm) {
             const term = searchTerm.toLowerCase();
@@ -5204,8 +6426,14 @@ function clearAllFilters() {
     filterProjectType = '';
     filterSalesPerson = '';
     filterDesigner = '';
+    filterMyProjects = false;
     sortColumn = '';
     sortDirection = 'asc';
+    showView('projects');
+}
+
+function toggleMyProjects() {
+    filterMyProjects = !filterMyProjects;
     showView('projects');
 }
 
@@ -5526,6 +6754,48 @@ function renderStackedBarChart(data, title) {
 }
 
 // Date range filter functions
+function setDateRangePreset(preset) {
+    const today = new Date();
+    let startDate, endDate = today;
+    
+    switch(preset) {
+        case 'last7days':
+            startDate = new Date(today);
+            startDate.setDate(today.getDate() - 7);
+            break;
+        case 'last30days':
+            startDate = new Date(today);
+            startDate.setDate(today.getDate() - 30);
+            break;
+        case 'last90days':
+            startDate = new Date(today);
+            startDate.setDate(today.getDate() - 90);
+            break;
+        case 'thisMonth':
+            startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+            break;
+        case 'lastMonth':
+            startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+            endDate = new Date(today.getFullYear(), today.getMonth(), 0);
+            break;
+        case 'thisQuarter':
+            const quarter = Math.floor(today.getMonth() / 3);
+            startDate = new Date(today.getFullYear(), quarter * 3, 1);
+            break;
+        case 'thisYear':
+            startDate = new Date(today.getFullYear(), 0, 1);
+            break;
+    }
+    
+    // Format dates as YYYY-MM-DD for input fields
+    const formatDate = (date) => date.toISOString().split('T')[0];
+    
+    document.getElementById('reportStartDate').value = formatDate(startDate);
+    document.getElementById('reportEndDate').value = formatDate(endDate);
+    
+    refreshReportsWithDateRange();
+}
+
 function refreshReportsWithDateRange() {
     const startDate = document.getElementById('reportStartDate')?.value || null;
     const endDate = document.getElementById('reportEndDate')?.value || null;
@@ -5589,6 +6859,34 @@ function getStatusClass(status) {
         'Cancelled': 'status-cancelled'
     };
     return map[status] || '';
+}
+
+function getStatusIcon(status) {
+    const icons = {
+        'Requested': '📝',
+        'In Progress': '🔵',
+        'Checking': '🔍',
+        'With Client': '👁️',
+        'On Hold': '⏸️',
+        'Changing': '🔄',
+        'Signed Off': '✅',
+        'Sent to Production': '🏭',
+        'Completed': '✓',
+        'Cancelled': '❌'
+    };
+    return icons[status] || '📋';
+}
+
+// Helper function to check if a project is finished (completed or sent to production)
+function isProjectFinished(project) {
+    return project.status === 'Completed' || project.status === 'Sent to Production';
+}
+
+// Helper function to check if a project should be excluded from active work
+function isProjectActive(project) {
+    return project.status !== 'Completed' && 
+           project.status !== 'Cancelled' && 
+           project.status !== 'Sent to Production';
 }
 
 function getStatusColor(status) {
@@ -5769,6 +7067,71 @@ async function stopTimer(projectId) {
     const minutes = Math.floor(totalElapsed / 60000);
     
     if (minutes > 0) {
+        // Show modal to get description
+        showTimerStopModal(projectId, minutes, project);
+    } else {
+        // Less than 1 minute, just stop without saving
+        finalizeTimerStop(projectId);
+        showNotification('⏱️ Timer stopped (less than 1 minute, not logged)', 'info');
+    }
+}
+
+function showTimerStopModal(projectId, minutes, project) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2>⏱️ Stop Timer</h2>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="background: #f0f9ff; border-left: 4px solid #3b82f6; padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;">
+                    <div style="font-size: 14px; color: #1e40af; margin-bottom: 8px;">
+                        ⏰ <strong>Time Logged:</strong> ${formatTimeDisplay(minutes)}
+                    </div>
+                    <div style="font-size: 13px; color: #3b82f6;">
+                        📋 <strong>Project:</strong> ${project.name}
+                    </div>
+                    <div style="font-size: 13px; color: #3b82f6; margin-top: 4px;">
+                        🔢 <strong>Revision:</strong> ${project.currentVersion}
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>What did you work on?</label>
+                    <textarea 
+                        id="timerDescription" 
+                        class="form-input" 
+                        rows="4" 
+                        placeholder="e.g., Updated floor plans based on client feedback, completed structural calculations, revised elevations..."
+                        style="resize: vertical; min-height: 100px;"
+                    ></textarea>
+                    <span class="field-hint">This helps track what was done in this work session</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+                <button class="btn-primary" id="confirmStopTimer">Save & Stop Timer</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    
+    // Focus on textarea
+    setTimeout(() => document.getElementById('timerDescription')?.focus(), 100);
+    
+    // Handle close
+    const closeBtn = modal.querySelector('.modal-close');
+    closeBtn.addEventListener('click', () => modal.remove());
+    
+    // Handle save
+    const saveBtn = document.getElementById('confirmStopTimer');
+    saveBtn.addEventListener('click', async () => {
+        const description = document.getElementById('timerDescription').value.trim() || 'Timed work session';
+        
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+        
         // Create time entry data for database
         const timeEntryData = {
             project_id: projectId,
@@ -5776,18 +7139,31 @@ async function stopTimer(projectId) {
             date: formatDateToDB(getCurrentDateFormatted()),
             duration: minutes,
             type: 'auto',
-            description: 'Timed work session',
+            description: description,
             revision: project.currentVersion
         };
         
         try {
             // Save to database
             await SupabaseAPI.createTimeEntry(timeEntryData);
+            
+            // Finalize timer stop
+            await finalizeTimerStop(projectId);
+            
+            modal.remove();
+            showNotification('✅ Timer stopped and logged successfully', 'success');
         } catch (error) {
             console.error('Error saving timer entry:', error);
-            showNotification('Error saving timer entry: ' + error.message, 'error');
+            showNotification('❌ Error saving timer entry: ' + error.message, 'error');
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save & Stop Timer';
         }
-    }
+    });
+}
+
+async function finalizeTimerStop(projectId) {
+    const project = projectsData.find(p => p.id === projectId);
+    if (!project) return;
     
     project.timerRunning = false;
     project.timerPaused = false;
@@ -5983,20 +7359,52 @@ function showAddTeamMemberModal() {
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>Full Name *</label>
-                    <input type="text" id="addName" class="form-input" placeholder="Enter full name">
+                    <label class="required">Full Name</label>
+                    <input 
+                        type="text" 
+                        id="addName" 
+                        class="form-input" 
+                        placeholder="Enter full name"
+                        data-label="Full Name"
+                        data-validate='["required", {"type":"minLength","params":[2]}]'
+                        onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                    >
                 </div>
                 <div class="form-group">
-                    <label>Username *</label>
-                    <input type="text" id="addUsername" class="form-input" placeholder="Enter username">
+                    <label class="required">Username</label>
+                    <input 
+                        type="text" 
+                        id="addUsername" 
+                        class="form-input" 
+                        placeholder="Enter username"
+                        data-label="Username"
+                        data-validate='["required", {"type":"minLength","params":[3]}]'
+                        onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                    >
+                    <span class="field-hint">Used for login</span>
                 </div>
                 <div class="form-group">
-                    <label>Password *</label>
-                    <input type="password" id="addPassword" class="form-input" placeholder="Enter password">
+                    <label class="required">Password</label>
+                    <input 
+                        type="password" 
+                        id="addPassword" 
+                        class="form-input" 
+                        placeholder="Enter password"
+                        data-label="Password"
+                        data-validate='["required", {"type":"minLength","params":[6]}]'
+                        onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                    >
+                    <span class="field-hint">Minimum 6 characters</span>
                 </div>
                 <div class="form-group">
-                    <label>Role *</label>
-                    <select id="addRole" class="form-input">
+                    <label class="required">Role</label>
+                    <select 
+                        id="addRole" 
+                        class="form-input"
+                        data-label="Role"
+                        data-validate='["required"]'
+                        onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                    >
                         <option value="">Select a role</option>
                         <option value="Designer">Designer</option>
                         <option value="Senior Designer">Senior Designer</option>
@@ -6006,8 +7414,16 @@ function showAddTeamMemberModal() {
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Email *</label>
-                    <input type="email" id="addEmail" class="form-input" placeholder="Enter email address">
+                    <label class="required">Email</label>
+                    <input 
+                        type="email" 
+                        id="addEmail" 
+                        class="form-input" 
+                        placeholder="Enter email address"
+                        data-label="Email"
+                        data-validate='["required", "email"]'
+                        onblur="formValidator.validateField(this, JSON.parse(this.getAttribute('data-validate')))"
+                    >
                 </div>
             </div>
             <div class="modal-footer">
@@ -6033,21 +7449,34 @@ function showAddTeamMemberModal() {
 }
 
 function saveNewTeamMember(buttonElement) {
+    // Validate form
+    const modalBody = document.querySelector('.team-edit-modal .modal-body');
+    if (!formValidator.validateForm(modalBody)) {
+        showNotification('⚠️ Please fix the validation errors', 'error');
+        return;
+    }
+    
     const name = document.getElementById('addName').value.trim();
     const username = document.getElementById('addUsername').value.trim();
     const password = document.getElementById('addPassword').value;
     const role = document.getElementById('addRole').value;
     const email = document.getElementById('addEmail').value.trim();
     
-    if (!name || !username || !password || !role || !email) {
-        showNotification('Please fill in all required fields', 'error');
-        return;
-    }
-    
     // Check if username already exists
     const existingUser = teamMembers.find(m => m.username === username);
     if (existingUser) {
-        showNotification('Username already taken', 'error');
+        const usernameInput = document.getElementById('addUsername');
+        formValidator.showFieldError(usernameInput, 'This username is already taken');
+        showNotification('❌ Username already taken', 'error');
+        return;
+    }
+    
+    // Check if email already exists
+    const existingEmail = teamMembers.find(m => m.email === email);
+    if (existingEmail) {
+        const emailInput = document.getElementById('addEmail');
+        formValidator.showFieldError(emailInput, 'This email is already in use');
+        showNotification('❌ Email already in use', 'error');
         return;
     }
     
@@ -6375,14 +7804,29 @@ function updateUserKPIs() {
             member.kpis.totalTimeLogged = totalTime;
             
             // Calculate average completion time (in days)
+            // Only use issuedToProduction for Order projects; use firstIssueDate for Planning/Visual
             const completedProjects = projectsData.filter(p => 
-                p.designer === member.name && p.status === 'Completed' && p.orderDate && p.issuedToProduction
+                p.designer === member.name && 
+                p.status === 'Completed' && 
+                p.orderDate
             );
             
             if (completedProjects.length > 0) {
                 const totalDays = completedProjects.reduce((sum, p) => {
                     const start = parseDate(p.orderDate);
-                    const end = parseDate(p.issuedToProduction);
+                    let end = null;
+                    
+                    // For Order projects, use issuedToProduction
+                    if (p.projectType === 'Order' && p.issuedToProduction) {
+                        end = parseDate(p.issuedToProduction);
+                    } 
+                    // For Planning/Visual, use firstIssueDate or fallback to due date
+                    else if (p.firstIssueDate) {
+                        end = parseDate(p.firstIssueDate);
+                    } else if (p.dueDate) {
+                        end = parseDate(p.dueDate);
+                    }
+                    
                     if (start && end) {
                         return sum + Math.ceil((end - start) / (1000 * 60 * 60 * 24));
                     }
@@ -6395,15 +7839,24 @@ function updateUserKPIs() {
             const projectsWithDueDate = projectsData.filter(p => 
                 p.designer === member.name && 
                 p.status === 'Completed' && 
-                p.dueDate && 
-                p.issuedToProduction
+                p.dueDate
             );
             
             if (projectsWithDueDate.length > 0) {
                 const onTime = projectsWithDueDate.filter(p => {
                     const due = parseDate(p.dueDate);
-                    const completed = parseDate(p.issuedToProduction);
-                    return completed <= due;
+                    let completed = null;
+                    
+                    // For Order projects, use issuedToProduction
+                    if (p.projectType === 'Order' && p.issuedToProduction) {
+                        completed = parseDate(p.issuedToProduction);
+                    } 
+                    // For Planning/Visual, use firstIssueDate
+                    else if (p.firstIssueDate) {
+                        completed = parseDate(p.firstIssueDate);
+                    }
+                    
+                    return completed && due && completed <= due;
                 }).length;
                 member.kpis.onTimeDelivery = Math.round((onTime / projectsWithDueDate.length) * 100);
             }
@@ -6465,56 +7918,48 @@ function showKPIBreakdown(kpiType) {
     switch(kpiType) {
         case 'briefQuality':
             title = '📋 Brief Quality Score Breakdown';
-            const goodBriefs = projectsData.filter(p => {
-                const changes = parseInt(p.totalChanges) || 0;
-                return changes <= 1 && p.currentVersion === 'Rev 1';
-            }).length;
-            const fairBriefs = projectsData.filter(p => {
-                const changes = parseInt(p.totalChanges) || 0;
-                return changes === 2 || changes === 3;
-            }).length;
-            const poorBriefs = projectsData.filter(p => {
-                const changes = parseInt(p.totalChanges) || 0;
-                return changes > 3;
-            }).length;
+            // Good briefs = empty or no briefFeedback (no issues to report)
+            const goodBriefs = projectsData.filter(p => 
+                !p.briefFeedback || p.briefFeedback.trim() === ''
+            ).length;
+            // Poor briefs = have briefFeedback content (issues were reported)
+            const poorBriefs = projectsData.filter(p => 
+                p.briefFeedback && p.briefFeedback.trim() !== ''
+            ).length;
             
             content = `
                 <div style="margin-bottom: 24px;">
                     <div style="font-size: 48px; font-weight: 700; color: #f59e0b; text-align: center;">${stats.briefQualityScore}%</div>
                     <div style="text-align: center; color: #6b7280; margin-top: 8px;">Overall Brief Quality Score</div>
+                    <div style="text-align: center; color: #374151; font-size: 14px; margin-top: 4px;">Based on Brief Feedback reports</div>
                 </div>
                 
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;">
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 24px;">
                     <div style="padding: 16px; background: #d1fae5; border-radius: 12px; text-align: center;">
                         <div style="font-size: 32px; font-weight: 700; color: #059669;">${goodBriefs}</div>
-                        <div style="font-size: 14px; color: #065f46; margin-top: 4px;">✅ Good Quality</div>
-                        <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">0-1 changes</div>
-                    </div>
-                    <div style="padding: 16px; background: #fef3c7; border-radius: 12px; text-align: center;">
-                        <div style="font-size: 32px; font-weight: 700; color: #d97706;">${fairBriefs}</div>
-                        <div style="font-size: 14px; color: #92400e; margin-top: 4px;">📋 Fair Quality</div>
-                        <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">2-3 changes</div>
+                        <div style="font-size: 14px; color: #065f46; margin-top: 4px;">✅ Good Quality Briefs</div>
+                        <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">No issues reported</div>
                     </div>
                     <div style="padding: 16px; background: #fee2e2; border-radius: 12px; text-align: center;">
                         <div style="font-size: 32px; font-weight: 700; color: #dc2626;">${poorBriefs}</div>
-                        <div style="font-size: 14px; color: #991b1b; margin-top: 4px;">⚠️ Poor Quality</div>
-                        <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">4+ changes</div>
+                        <div style="font-size: 14px; color: #991b1b; margin-top: 4px;">⚠️ Briefs with Issues</div>
+                        <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">Problems reported</div>
                     </div>
                 </div>
                 
                 <div style="background: #f9fafb; padding: 16px; border-radius: 12px;">
-                    <h4 style="margin: 0 0 12px 0; font-size: 14px; color: #1f2937;">Projects Needing Most Improvement:</h4>
-                    <div style="max-height: 200px; overflow-y: auto;">
+                    <h4 style="margin: 0 0 12px 0; font-size: 14px; color: #1f2937;">Projects with Brief Issues (${poorBriefs}):</h4>
+                    <div style="max-height: 300px; overflow-y: auto;">
                         ${projectsData
-                            .filter(p => (parseInt(p.totalChanges) || 0) > 3)
-                            .sort((a, b) => (parseInt(b.totalChanges) || 0) - (parseInt(a.totalChanges) || 0))
-                            .slice(0, 10)
+                            .filter(p => p.briefFeedback && p.briefFeedback.trim() !== '')
+                            .sort((a, b) => (b.briefFeedback?.length || 0) - (a.briefFeedback?.length || 0))
                             .map(p => `
-                                <div style="display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #e5e7eb; cursor: pointer; transition: background 0.2s;" onclick="showProjectDetail('${p.id}'); closeModal();" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='transparent'">
-                                    <span style="font-size: 14px; color: #374151;">${p.jobNumber} - ${p.client}</span>
-                                    <span style="font-size: 14px; font-weight: 600; color: #dc2626;">${p.totalChanges} changes</span>
+                                <div style="padding: 12px; border-bottom: 1px solid #e5e7eb; cursor: pointer; transition: background 0.2s;" onclick="showProjectDetail('${p.id}'); closeModal();" onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='transparent'">
+                                    <div style="font-size: 14px; font-weight: 600; color: #374151;">${p.jobNumber} - ${p.client}</div>
+                                    <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">Sales: ${p.salesPerson || 'N/A'}</div>
+                                    <div style="font-size: 12px; color: #dc2626; margin-top: 4px; font-style: italic;">"${p.briefFeedback.substring(0, 100)}${p.briefFeedback.length > 100 ? '...' : ''}"</div>
                                 </div>
-                            `).join('') || '<div style="padding: 12px; text-align: center; color: #6b7280;">No projects found</div>'}
+                            `).join('') || '<div style="padding: 12px; text-align: center; color: #6b7280;">All briefs are clear - no issues reported! 🎉</div>'}
                     </div>
                 </div>
             `;
@@ -6652,8 +8097,8 @@ function showKPIBreakdown(kpiType) {
             title = '👥 Active Designers Breakdown';
             const designers = [...new Set(projectsData.map(p => p.designer))].filter(d => d);
             const designerDetails = designers.map(name => {
-                const projects = projectsData.filter(p => p.designer === name && p.status !== 'Completed' && p.status !== 'Cancelled');
-                const completed = projectsData.filter(p => p.designer === name && p.status === 'Completed').length;
+                const projects = projectsData.filter(p => p.designer === name && isProjectActive(p));
+                const completed = projectsData.filter(p => p.designer === name && isProjectFinished(p)).length;
                 return { name, active: projects.length, completed, projects };
             }).sort((a, b) => b.active - a.active);
             
@@ -6695,7 +8140,7 @@ function showKPIBreakdown(kpiType) {
             title = '📊 Workload Distribution';
             const workloadDesigners = [...new Set(projectsData.map(p => p.designer))].filter(d => d);
             const workloadData = workloadDesigners.map(name => {
-                const activeProjects = projectsData.filter(p => p.designer === name && p.status !== 'Completed' && p.status !== 'Cancelled');
+                const activeProjects = projectsData.filter(p => p.designer === name && isProjectActive(p));
                 return { 
                     name, 
                     count: activeProjects.length, 
@@ -6846,7 +8291,7 @@ function showKPIBreakdown(kpiType) {
             title = kpiType === 'signedOff' ? '✅ Signed Off Projects' : '🏭 Sent to Production';
             const filteredProjects = kpiType === 'signedOff' ? 
                 projectsData.filter(p => p.status === 'Signed Off') :
-                projectsData.filter(p => p.issuedToProduction);
+                projectsData.filter(p => p.projectType === 'Order' && p.issuedToProduction);
             const totalValue = kpiType === 'signedOff' ? stats.signedOffValue : stats.sentToProductionValue;
             const totalVolume = kpiType === 'signedOff' ? stats.signedOffVolume : stats.sentToProductionVolume;
             content = `

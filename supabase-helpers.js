@@ -768,6 +768,81 @@ const SupabaseAPI = {
             console.error('Delete task error:', error);
             throw error;
         }
+    },
+
+    // ==================== CHANGE LOG ====================
+    
+    async getChangeLogs(projectId) {
+        try {
+            const { data, error } = await window.supabaseClient
+                .from('change_log')
+                .select('*')
+                .eq('project_id', projectId)
+                .order('change_date', { ascending: false });
+            
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Get change logs error:', error);
+            throw error;
+        }
+    },
+
+    async addChangeLog(changeData) {
+        try {
+            const { data, error } = await window.supabaseClient
+                .from('change_log')
+                .insert([{
+                    project_id: changeData.projectId,
+                    version_number: changeData.versionNumber,
+                    changed_by: changeData.changedBy,
+                    change_type: changeData.changeType,
+                    change_description: changeData.description,
+                    previous_value: changeData.previousValue || null,
+                    new_value: changeData.newValue || null
+                }])
+                .select()
+                .single();
+            
+            if (error) throw error;
+            return data;
+        } catch (error) {
+            console.error('Add change log error:', error);
+            throw error;
+        }
+    },
+
+    async getChangeLogsByVersion(projectId, versionNumber) {
+        try {
+            const { data, error } = await window.supabaseClient
+                .from('change_log')
+                .select('*')
+                .eq('project_id', projectId)
+                .eq('version_number', versionNumber)
+                .order('change_date', { ascending: false });
+            
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Get change logs by version error:', error);
+            throw error;
+        }
+    },
+
+    async getRelatedProjects(jobNumber) {
+        try {
+            const { data, error } = await window.supabaseClient
+                .from('projects')
+                .select('*')
+                .eq('job_number', jobNumber)
+                .order('created_at', { ascending: true });
+            
+            if (error) throw error;
+            return data || [];
+        } catch (error) {
+            console.error('Get related projects error:', error);
+            throw error;
+        }
     }
 };
 
