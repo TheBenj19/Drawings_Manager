@@ -4,6 +4,31 @@
 // This file contains all Supabase database operations
 // =====================================================
 
+// Global error handler for authentication issues
+function handleAuthError(error) {
+    // Check if it's a refresh token error
+    if (error && (
+        error.message?.includes('Invalid Refresh Token') ||
+        error.message?.includes('Refresh Token Not Found') ||
+        error.message?.includes('refresh_token') ||
+        error.status === 400
+    )) {
+        console.warn('Session expired or invalid. Clearing local storage and redirecting to login...');
+        
+        // Clear all authentication data
+        localStorage.clear();
+        
+        // Show user-friendly message
+        alert('Your session has expired. Please log in again.');
+        
+        // Redirect to login
+        window.location.href = '/';
+        
+        return true; // Indicates error was handled
+    }
+    return false; // Error not handled
+}
+
 const SupabaseAPI = {
     // ==================== AUTHENTICATION ====================
     
@@ -49,7 +74,8 @@ const SupabaseAPI = {
             return session;
         } catch (error) {
             console.error('Get session error:', error);
-            return null;
+            if (handleAuthError(error)) return null;
+            throw error;
         }
     },
     

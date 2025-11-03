@@ -203,7 +203,22 @@ const errorHandler = new ErrorHandler();
 
 // Global error catcher for unhandled promise rejections
 window.addEventListener('unhandledrejection', (event) => {
-    errorHandler.handleError(event.reason, { 
+    // Check if it's a Supabase auth error
+    const error = event.reason;
+    if (error && error.message && (
+        error.message.includes('Invalid Refresh Token') ||
+        error.message.includes('Refresh Token Not Found') ||
+        error.message.includes('JWT')
+    )) {
+        console.warn('Authentication error detected. Clearing session...');
+        localStorage.clear();
+        alert('Your session has expired. Please log in again.');
+        window.location.href = '/';
+        event.preventDefault();
+        return;
+    }
+    
+    errorHandler.handleError(error, { 
         type: 'unhandled_rejection',
         promise: 'Promise rejection was not caught'
     });
