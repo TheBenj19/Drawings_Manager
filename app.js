@@ -1057,8 +1057,10 @@ async function initializeApp() {
 }
 
 // Load projects from Supabase
-async function loadProjectsFromDatabase() {
-    showLoading('Loading projects...');
+async function loadProjectsFromDatabase(showNotificationFlag = true, showLoadingIndicator = true) {
+    if (showLoadingIndicator) {
+        showLoading('Loading projects...');
+    }
     
     try {
         // Map frontend column names to database column names
@@ -1179,10 +1181,16 @@ async function loadProjectsFromDatabase() {
         // Invalidate stats cache when projects are reloaded
         invalidateStatsCache();
         
-        hideLoading();
-        showNotification('✅ Projects loaded successfully', 'success');
+        if (showLoadingIndicator) {
+            hideLoading();
+        }
+        if (showNotificationFlag) {
+            showNotification('✅ Projects loaded successfully', 'success');
+        }
     } catch (error) {
-        hideLoading();
+        if (showLoadingIndicator) {
+            hideLoading();
+        }
         errorHandler.handleError(error, {
             action: 'loadProjects',
             projectCount: projectsData?.length || 0
@@ -1191,11 +1199,97 @@ async function loadProjectsFromDatabase() {
     }
 }
 
+// Update projects table in place without full page refresh
+function updateProjectsTableInPlace() {
+    // Use the already-loaded projectsData (no filtering/sorting needed - done on server)
+    const sorted = projectsData;
+    
+    // Update table body only
+    const tbody = document.querySelector('.projects-table tbody');
+    if (tbody) {
+        tbody.innerHTML = sorted.map(project => `
+            <tr onclick="showProjectDetail('${project.id}')" style="cursor: pointer; ${isProjectFinished(project) ? 'opacity: 0.6; background: rgba(0, 0, 0, 0.02);' : ''}">
+                <td class="project-name" ${isProjectFinished(project) ? 'style="text-decoration: line-through; color: #6b7280;"' : ''}>${project.jobNumber}</td>
+                <td${isProjectFinished(project) ? ' style="color: #6b7280;"' : ''}>${project.client}</td>
+                <td${isProjectFinished(project) ? ' style="color: #6b7280;"' : ''}>${project.orderType}</td>
+                <td>
+                    <span class="tasktype-badge ${getProjectTypeClass(project.projectType)}">
+                        ${project.projectType}
+                    </span>
+                </td>
+                <td>${project.salesPerson}</td>
+                <td>${project.designer}</td>
+                <td>
+                    <span class="status-badge ${getStatusClass(project.status)}">
+                        ${project.status}
+                    </span>
+                </td>
+                <td>${project.dueDate}</td>
+                <td>${project.currentVersion}</td>
+                <td>
+                    <span class="priority-badge ${project.structuralCalcs === 'Yes' ? 'priority-high' : 'priority-low'}">
+                        ${project.structuralCalcs}
+                    </span>
+                </td>
+            </tr>
+        `).join('');
+    }
+    
+    // Update sort icons in header
+    const getSortIcon = (column) => {
+        if (sortColumn !== column) return '↕️';
+        return sortDirection === 'asc' ? '↑' : '↓';
+    };
+    
+    document.querySelectorAll('.projects-table th .sort-icon').forEach((icon, index) => {
+        const columns = ['jobNumber', 'client', 'orderType', 'projectType', 'salesPerson', 'designer', 'status', 'dueDate', 'currentVersion', 'structuralCalcs'];
+        if (columns[index]) {
+            icon.textContent = getSortIcon(columns[index]);
+        }
+    });
+    
+    // Update or create pagination
+    const existingPagination = document.querySelector('.pagination-container');
+    const projectsPage = document.querySelector('.projects-page');
+    
+    if (sorted.length === 0) {
+        // Show empty state
+        if (existingPagination) existingPagination.remove();
+        let emptyState = document.querySelector('.empty-state');
+        if (!emptyState && projectsPage) {
+            const emptyDiv = document.createElement('div');
+            emptyDiv.innerHTML = renderProjectsEmptyState();
+            projectsPage.appendChild(emptyDiv.firstElementChild);
+        }
+    } else {
+        // Remove empty state if exists
+        const emptyState = document.querySelector('.empty-state');
+        if (emptyState) emptyState.remove();
+        
+        // Update pagination
+        const paginationHTML = renderPaginationControls();
+        if (paginationHTML) {
+            if (existingPagination) {
+                existingPagination.outerHTML = paginationHTML;
+            } else if (projectsPage) {
+                const paginationDiv = document.createElement('div');
+                paginationDiv.innerHTML = paginationHTML;
+                projectsPage.appendChild(paginationDiv.firstElementChild);
+            }
+        } else if (existingPagination) {
+            existingPagination.remove();
+        }
+    }
+}
+
 // Pagination Navigation Functions
 async function goToPage(page) {
     if (page < 1 || page > paginationState.totalPages) return;
     paginationState.currentPage = page;
-    await loadProjectsFromDatabase();
+    await loadProjectsFromDatabase(false, false); // No notification, no loading indicator
+    
+    // Update table in place without full refresh
+    updateProjectsTableInPlace();
     
     // Scroll to top smoothly
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1216,7 +1310,10 @@ async function goToPrevPage() {
 async function changePageSize(newSize) {
     paginationState.pageSize = parseInt(newSize);
     paginationState.currentPage = 1; // Reset to first page
-    await loadProjectsFromDatabase();
+    await loadProjectsFromDatabase(false, false); // No notification, no loading indicator
+    
+    // Update table in place without full refresh
+    updateProjectsTableInPlace();
 }
 
 // Load designer capacities from database
@@ -6594,7 +6691,7 @@ function sortProjectsList(projects) {
     });
 }
 
-function sortBy(column) {
+async function sortBy(column) {
     if (sortColumn === column) {
         sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
     } else {
@@ -6606,7 +6703,10 @@ function sortBy(column) {
     paginationState.currentPage = 1;
     
     // Reload with new sort
-    loadProjectsFromDatabase();
+    await loadProjectsFromDatabase(false, false); // No notification, no loading indicator
+    
+    // Update table in place without full refresh
+    updateProjectsTableInPlace();
 }
 
 function toggleFilters() {
@@ -6616,7 +6716,7 @@ function toggleFilters() {
     }
 }
 
-function applyFilters() {
+async function applyFilters() {
     filterStatus = document.getElementById('filterStatus')?.value || '';
     filterOrderType = document.getElementById('filterOrderType')?.value || '';
     filterProjectType = document.getElementById('filterProjectType')?.value || '';
@@ -6627,14 +6727,10 @@ function applyFilters() {
     paginationState.currentPage = 1;
     
     // Reload with new filters
-    loadProjectsFromDatabase();
+    await loadProjectsFromDatabase(false, false); // No notification, no loading indicator
     
-    // Update filter button text
-    const filterBtn = document.getElementById('filterBtn');
-    if (filterBtn) {
-        const hasActiveFilters = filterStatus || filterOrderType || filterProjectType || filterSalesPerson || filterDesigner;
-        filterBtn.innerHTML = hasActiveFilters ? '🔍 Filters Active' : '🔍 Filter';
-    }
+    // Update table in place without full refresh
+    updateProjectsTableInPlace();
 }
 
 function clearAllFilters() {
@@ -6684,7 +6780,8 @@ function attachProjectsEventListeners() {
             searchDebounce = setTimeout(async () => {
                 searchQuery = searchTerm;
                 paginationState.currentPage = 1;
-                await loadProjectsFromDatabase();
+                await loadProjectsFromDatabase(false, false); // No notification, no loading indicator
+                updateProjectsTableInPlace(); // Update in place
             }, 300);
         });
     }
