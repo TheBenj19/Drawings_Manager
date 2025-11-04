@@ -127,6 +127,78 @@ const SupabaseAPI = {
         }
     },
     
+    async getProjectsPaginated(options = {}) {
+        try {
+            const {
+                page = 1,
+                limit = 50,
+                filters = {},
+                sortBy = 'created_at',
+                sortOrder = 'desc'
+            } = options;
+            
+            // Calculate range for pagination
+            const from = (page - 1) * limit;
+            const to = from + limit - 1;
+            
+            // Build query with count
+            let query = window.supabaseClient
+                .from('projects')
+                .select('*', { count: 'exact' });
+            
+            // Apply filters
+            if (filters.status && filters.status !== '') {
+                query = query.eq('status', filters.status);
+            }
+            
+            if (filters.designer && filters.designer !== '') {
+                query = query.eq('designer', filters.designer);
+            }
+            
+            if (filters.projectType && filters.projectType !== '') {
+                query = query.eq('project_type', filters.projectType);
+            }
+            
+            if (filters.client && filters.client !== '') {
+                query = query.ilike('client', `%${filters.client}%`);
+            }
+            
+            if (filters.jobNumber && filters.jobNumber !== '') {
+                query = query.ilike('job_number', `%${filters.jobNumber}%`);
+            }
+            
+            if (filters.search && filters.search !== '') {
+                // Search across multiple fields
+                query = query.or(`job_number.ilike.%${filters.search}%,name.ilike.%${filters.search}%,client.ilike.%${filters.search}%,description.ilike.%${filters.search}%`);
+            }
+            
+            // Apply sorting
+            query = query.order(sortBy, { ascending: sortOrder === 'asc' });
+            
+            // Apply pagination
+            query = query.range(from, to);
+            
+            const { data, error, count } = await query;
+            
+            if (error) throw error;
+            
+            return {
+                projects: data || [],
+                pagination: {
+                    currentPage: page,
+                    pageSize: limit,
+                    totalProjects: count || 0,
+                    totalPages: Math.ceil((count || 0) / limit),
+                    hasNextPage: page < Math.ceil((count || 0) / limit),
+                    hasPrevPage: page > 1
+                }
+            };
+        } catch (error) {
+            console.error('Get projects paginated error:', error);
+            throw error;
+        }
+    },
+    
     async getProjectById(id) {
         try {
             const { data, error } = await window.supabaseClient

@@ -1061,9 +1061,36 @@ async function loadProjectsFromDatabase() {
     showLoading('Loading projects...');
     
     try {
-        // Use retry logic for loading projects
-        const projects = await errorHandler.retryOperation(
-            async () => await SupabaseAPI.getAllProjects(),
+        // Map frontend column names to database column names
+        const columnMap = {
+            'jobNumber': 'job_number',
+            'client': 'client',
+            'orderType': 'order_type',
+            'projectType': 'project_type',
+            'salesPerson': 'sales_person',
+            'designer': 'designer',
+            'status': 'status',
+            'dueDate': 'due_date',
+            'currentVersion': 'current_version',
+            'structuralCalcs': 'structural_calcs'
+        };
+        
+        const dbSortColumn = sortColumn ? (columnMap[sortColumn] || sortColumn) : 'created_at';
+        
+        // Use pagination for better performance
+        const result = await errorHandler.retryOperation(
+            async () => await SupabaseAPI.getProjectsPaginated({
+                page: paginationState.currentPage,
+                limit: paginationState.pageSize,
+                filters: {
+                    status: filterStatus,
+                    designer: filterDesigner,
+                    projectType: filterProjectType,
+                    search: searchQuery
+                },
+                sortBy: dbSortColumn,
+                sortOrder: sortDirection || 'desc'
+            }),
             {
                 maxRetries: 3,
                 initialDelay: 1000,
@@ -1073,7 +1100,11 @@ async function loadProjectsFromDatabase() {
             }
         );
         
-        projectsData = projects.map(p => ({
+        // Update pagination state
+        paginationState = result.pagination;
+        
+        // Map database fields to app format
+        projectsData = result.projects.map(p => ({
             id: p.id,
             jobNumber: p.job_number,
             name: p.name,
@@ -1160,6 +1191,34 @@ async function loadProjectsFromDatabase() {
     }
 }
 
+// Pagination Navigation Functions
+async function goToPage(page) {
+    if (page < 1 || page > paginationState.totalPages) return;
+    paginationState.currentPage = page;
+    await loadProjectsFromDatabase();
+    
+    // Scroll to top smoothly
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function goToNextPage() {
+    if (paginationState.hasNextPage) {
+        await goToPage(paginationState.currentPage + 1);
+    }
+}
+
+async function goToPrevPage() {
+    if (paginationState.hasPrevPage) {
+        await goToPage(paginationState.currentPage - 1);
+    }
+}
+
+async function changePageSize(newSize) {
+    paginationState.pageSize = parseInt(newSize);
+    paginationState.currentPage = 1; // Reset to first page
+    await loadProjectsFromDatabase();
+}
+
 // Load designer capacities from database
 let designerCapacities = [];
 async function loadDesignerCapacities() {
@@ -1238,6 +1297,16 @@ function formatDateToDB(dateString) {
 // Project Data Store
 let projectsData = [];
 let tasksData = [];
+
+// Pagination State
+let paginationState = {
+    currentPage: 1,
+    pageSize: 50,
+    totalProjects: 0,
+    totalPages: 0,
+    hasNextPage: false,
+    hasPrevPage: false
+};
 
 // Load sample projects - will be replaced by database
 const loadSampleProjects = () => [
@@ -1532,6 +1601,7 @@ let currentProject = null;
 let currentTask = null;
 let isEditing = false;
 let searchTerm = '';
+let searchQuery = ''; // For database search
 let filterStatus = '';
 let filterOrderType = '';
 let filterProjectType = '';
@@ -2199,8 +2269,130 @@ function renderProjectsPage() {
                 </table>
             </div>
             ${sorted.length === 0 ? renderProjectsEmptyState() : ''}
+            ${renderPaginationControls()}
         </div>
     `;
+}
+
+// Render Pagination Controls
+function renderPaginationControls() {
+    const { currentPage, totalPages, hasNextPage, hasPrevPage, totalProjects, pageSize } = paginationState;
+    
+    // If no projects or only one page, don't show pagination
+    if (totalProjects === 0 || totalPages <= 1) return '';
+    
+    // Calculate display range
+    const startItem = (currentPage - 1) * pageSize + 1;
+    const endItem = Math.min(currentPage * pageSize, totalProjects);
+    
+    return `
+        <div class="pagination-container">
+            <!-- Summary -->
+            <div class="pagination-info">
+                Showing ${startItem}-${endItem} of ${totalProjects} projects
+            </div>
+            
+            <!-- Controls -->
+            <div class="pagination-controls">
+                <!-- First Page -->
+                <button 
+                    onclick="goToPage(1)" 
+                    ${!hasPrevPage ? 'disabled' : ''}
+                    class="pagination-btn"
+                    title="First page">
+                    ⏮️
+                </button>
+                
+                <!-- Previous Page -->
+                <button 
+                    onclick="goToPrevPage()" 
+                    ${!hasPrevPage ? 'disabled' : ''}
+                    class="pagination-btn"
+                    title="Previous page">
+                    ◀️ Previous
+                </button>
+                
+                <!-- Page Numbers -->
+                <div class="page-numbers">
+                    ${generatePageNumbers(currentPage, totalPages)}
+                </div>
+                
+                <!-- Next Page -->
+                <button 
+                    onclick="goToNextPage()" 
+                    ${!hasNextPage ? 'disabled' : ''}
+                    class="pagination-btn"
+                    title="Next page">
+                    Next ▶️
+                </button>
+                
+                <!-- Last Page -->
+                <button 
+                    onclick="goToPage(${totalPages})" 
+                    ${!hasNextPage ? 'disabled' : ''}
+                    class="pagination-btn"
+                    title="Last page">
+                    ⏭️
+                </button>
+            </div>
+            
+            <!-- Page Size Selector -->
+            <div class="page-size-selector">
+                <label>Show:</label>
+                <select onchange="changePageSize(this.value)" class="page-size-select">
+                    <option value="25" ${pageSize === 25 ? 'selected' : ''}>25</option>
+                    <option value="50" ${pageSize === 50 ? 'selected' : ''}>50</option>
+                    <option value="100" ${pageSize === 100 ? 'selected' : ''}>100</option>
+                    <option value="200" ${pageSize === 200 ? 'selected' : ''}>200</option>
+                </select>
+                <span>per page</span>
+            </div>
+        </div>
+    `;
+}
+
+// Generate smart page number buttons
+function generatePageNumbers(current, total) {
+    const pages = [];
+    const maxVisible = 7;
+    
+    if (total <= maxVisible) {
+        // Show all pages
+        for (let i = 1; i <= total; i++) {
+            pages.push(i);
+        }
+    } else {
+        // Show smart range around current page
+        pages.push(1);
+        
+        if (current > 3) {
+            pages.push('...');
+        }
+        
+        for (let i = Math.max(2, current - 1); i <= Math.min(total - 1, current + 1); i++) {
+            pages.push(i);
+        }
+        
+        if (current < total - 2) {
+            pages.push('...');
+        }
+        
+        pages.push(total);
+    }
+    
+    return pages.map(page => {
+        if (page === '...') {
+            return '<span class="pagination-ellipsis">...</span>';
+        }
+        return `
+            <button 
+                onclick="goToPage(${page})"
+                class="pagination-btn ${page === current ? 'active' : ''}"
+                title="Go to page ${page}">
+                ${page}
+            </button>
+        `;
+    }).join('');
 }
 
 // Render New Project Page
@@ -6409,7 +6601,12 @@ function sortBy(column) {
         sortColumn = column;
         sortDirection = 'asc';
     }
-    updateProjectsTable();
+    
+    // Reset to page 1 when sorting changes
+    paginationState.currentPage = 1;
+    
+    // Reload with new sort
+    loadProjectsFromDatabase();
 }
 
 function toggleFilters() {
@@ -6425,7 +6622,13 @@ function applyFilters() {
     filterProjectType = document.getElementById('filterProjectType')?.value || '';
     filterSalesPerson = document.getElementById('filterSalesPerson')?.value || '';
     filterDesigner = document.getElementById('filterDesigner')?.value || '';
-    updateProjectsTable();
+    
+    // Reset to page 1 when filters change
+    paginationState.currentPage = 1;
+    
+    // Reload with new filters
+    loadProjectsFromDatabase();
+    
     // Update filter button text
     const filterBtn = document.getElementById('filterBtn');
     if (filterBtn) {
@@ -6444,6 +6647,10 @@ function clearAllFilters() {
     filterMyProjects = false;
     sortColumn = '';
     sortDirection = 'asc';
+    
+    // Reset to page 1
+    paginationState.currentPage = 1;
+    
     showView('projects');
 }
 
@@ -6468,9 +6675,17 @@ function updatePendingCount() {
 function attachProjectsEventListeners() {
     const searchInput = document.getElementById('searchInput');
     if (searchInput) {
+        let searchDebounce;
         searchInput.addEventListener('input', function(e) {
             searchTerm = e.target.value;
-            updateProjectsTable();
+            
+            // Debounce search - wait 300ms after user stops typing
+            clearTimeout(searchDebounce);
+            searchDebounce = setTimeout(async () => {
+                searchQuery = searchTerm;
+                paginationState.currentPage = 1;
+                await loadProjectsFromDatabase();
+            }, 300);
         });
     }
 }
@@ -8437,40 +8652,6 @@ function closeModal() {
     if (modal) {
         modal.remove();
     }
-}
-
-// Helper function for status colors in KPI modals
-function getStatusColor(status) {
-    const colors = {
-        'Requested': '#3b82f6',
-        'In Progress': '#3b82f6',
-        'Checking': '#f59e0b',
-        'With Client': '#ec4899',
-        'Signed Off': '#10b981',
-        'On Hold': '#6b7280',
-        'Changing': '#1abc9c',
-        'Sent to Production': '#16a085',
-        'Cancelled': '#ef4444',
-        'Completed': '#059669'
-    };
-    return colors[status] || '#6b7280';
-}
-
-// Get status icon emoji
-function getStatusIcon(status) {
-    const icons = {
-        'Requested': '📝',
-        'In Progress': '🔵',
-        'Checking': '🔍',
-        'With Client': '👁️',
-        'Signed Off': '✅',
-        'On Hold': '⏸️',
-        'Changing': '🔄',
-        'Sent to Production': '🏭',
-        'Cancelled': '❌',
-        'Completed': '✓'
-    };
-    return icons[status] || '📋';
 }
 
 // Generate avatar HTML with color based on name
